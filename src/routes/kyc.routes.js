@@ -1,9 +1,12 @@
 import { Router } from "express";
 import { body } from "express-validator";
-import * as kycController from "../controllers/kyc.controller.js";
+import * as kycControllerRaw from "../controllers/kyc.controller.js";
 import { requireAuth, requireAdmin } from "../middleware/auth.middleware.js";
 import { handleUploadErrors } from "../middleware/upload.middleware.js";
 import { validate } from "../middleware/validate.middleware.js";
+import { wrapAsync } from "../middleware/asyncHandler.js";
+
+const kycController = wrapAsync(kycControllerRaw);
 
 const memberRouter = Router();
 const adminRouter = Router();

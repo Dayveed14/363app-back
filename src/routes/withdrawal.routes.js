@@ -1,9 +1,12 @@
 import { Router } from "express";
 import { body } from "express-validator";
-import * as withdrawalController from "../controllers/withdrawal.controller.js";
+import * as withdrawalControllerRaw from "../controllers/withdrawal.controller.js";
 import { requireAuth, requireAdmin } from "../middleware/auth.middleware.js";
 import { validate } from "../middleware/validate.middleware.js";
 import { otpLimiter } from "../middleware/rateLimit.middleware.js";
+import { wrapAsync } from "../middleware/asyncHandler.js";
+
+const withdrawalController = wrapAsync(withdrawalControllerRaw);
 
 const memberRouter = Router();
 const adminRouter = Router();

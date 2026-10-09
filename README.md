@@ -327,18 +327,93 @@ shape as deposits:
    emailed with the reason.
 7. `GET /api/withdrawals/me` (member) — own withdrawal history.
 
+### Business Finance Facility (phase 1: through approve/decline)
+
+Covers the front half of the facility lifecycle: **eligibility check →
+application → documents → officer review → approve (with possibly
+different terms) / decline / request more information**. Deliberately
+stops short of offer acceptance, agreement generation/signing,
+disbursement, the active-facility record, repayment schedules, and
+appeals — those are their own build, and the schema keeps *application*
+and *facility* as separate concepts (a declined application never becomes
+a facility; only an accepted, disbursed one will) so adding them later
+doesn't mean reshaping what's here.
+
+- `GET /api/finance-facilities/eligibility` (member) — computed entirely
+  server-side from the member's real data (KYC status, membership age,
+  **confirmed** deposits and **processed** withdrawals only — not
+  pending/failed/declined attempts, existing active application). Returns
+  `{ eligible, note, checks, metrics }`. "Eligible" here is explicitly
+  *preliminary* — business purpose can't be assessed until an application
+  exists, so this never claims a final yes.
+- `POST /api/finance-facilities/apply` (member, JSON) — requires an
+  **approved** KYC submission, and blocks a second application while one
+  is in `submitted` / `under_review` / `additional_information_required` /
+  `approved`. A declined application doesn't block reapplying. Emails
+  every admin.
+- `POST /api/finance-facilities/:id/documents` (member, multipart, one
+  `document` file + `documentType` per call) — facility-specific
+  documents only (business registration, bank statement, etc.), uploaded
+  to Cloudinary under `finance-facility/<userId>/<applicationId>/` with
+  the same `authenticated` access-restriction as KYC documents. Identity
+  and address proof are **not** re-requested or duplicated for a member
+  with approved KYC; the officer review reads those via the existing KYC
+  document routes. Uploading while an application is in
+  `additional_information_required` automatically moves it back into
+  `under_review`.
+- `GET /api/finance-facilities/me`, `GET /api/finance-facilities/:id`
+  (member; owner-or-admin enforced in the service) and `GET
+  .../:id/documents/:docId` (same proxy-through-our-endpoint pattern as
+  KYC documents — the signed Cloudinary URL never reaches the browser).
+- Admin (`/api/admin/finance-facilities`): `GET /` (queue, filterable by
+  `status`), `GET /:id` (full detail — the admin additionally gets
+  `accountAnalysis` metrics, a KYC summary, and current balances; **a
+  member's own view of their application deliberately omits these**), `POST
+  /:id/request-info`, `POST /:id/approve`, `POST /:id/decline`. Opening a
+  `submitted` application as an admin quietly moves it to `under_review`
+  (no separate "start review" click). Approval takes
+  `approvedAmount`, `interestRate`, `termMonths`, `repaymentFrequency`
+  and `installmentAmount` — the officer enters the installment directly
+  rather than the backend computing it, since flat vs. reducing-balance
+  amortization is a lending-policy choice the cooperative hasn't made yet.
+
+**Eligibility thresholds are placeholders, not policy.** They live as
+named constants at the top of `src/services/financeFacility.service.js`
+(`ELIGIBILITY_RULES`: minimum membership months, minimum confirmed
+deposits, minimum average monthly deposit) specifically so whoever owns
+this product can tune them in one place. Treat the current values as
+reasonable starting guesses, not a lending policy — they encode real
+credit-risk judgment this codebase isn't qualified to make for the
+cooperative.
+
+### Error handling across all routes
+
+Every route file wraps its controller with `wrapAsync()`
+(`src/middleware/asyncHandler.js`). This matters: Express 4 doesn't
+forward a rejected promise from an async handler to error middleware, and
+every controller re-`throw`s anything that isn't a known `HttpError` —
+without the wrapper that becomes an unhandled promise rejection that
+**crashes the entire Node process** (taking down every member's session,
+not just the one request). It surfaced while testing document upload
+against an unreachable Cloudinary; any unexpected failure anywhere
+(a DB hiccup, a storage outage) would have done the same. Now an
+unexpected error returns a normal 500 from the global handler in
+`app.js` and the server keeps running.
+
 ### Database
 
 `src/db/migrations/` is a tracked, ordered sequence (`001_init.sql`,
 `002_kyc_and_deposits.sql`, `003_kyc_documents_to_cloudinary.sql`,
-`004_withdrawals.sql`). `npm run migrate` records what's applied in a
-`schema_migrations` table and skips anything already run — safe to re-run,
-and the pattern for the next phase is just adding `005_*.sql`.
+`004_withdrawals.sql`, `005_finance_facility_applications.sql`). `npm run
+migrate` records what's applied in a `schema_migrations` table and skips
+anything already run — safe to re-run, and the pattern for the next phase
+is just adding `006_*.sql`.
 
 ## What's next (not in this slice)
 
-The 363 Resources Business Finance Facility (applications, disbursement,
-repayment), broader admin reporting, and audit logs are the remaining
-phases. Revisit the CSRF note above before anything else here moves
-money — deposits and withdrawals both already do, so it's worth
-prioritizing soon.
+Finance facility phase 2 — offer acceptance/decline, agreement
+generation + signed-agreement upload, disbursement, the active-facility
+record with repayment schedule, and appeals of declined applications —
+plus broader admin reporting and audit logs. Revisit the CSRF note above
+before any of those move money; deposits and withdrawals already do, and
+disbursement/repayments will too, so it's worth prioritizing soon.

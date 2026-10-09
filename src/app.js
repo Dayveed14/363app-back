@@ -8,6 +8,7 @@ import authRoutes from "./routes/auth.routes.js";
 import { kycMemberRoutes, kycAdminRoutes } from "./routes/kyc.routes.js";
 import { depositMemberRoutes, depositAdminRoutes } from "./routes/deposit.routes.js";
 import { withdrawalMemberRoutes, withdrawalAdminRoutes } from "./routes/withdrawal.routes.js";
+import { financeFacilityMemberRoutes, financeFacilityAdminRoutes } from "./routes/financeFacility.routes.js";
 
 export const app = express();
 
@@ -38,6 +39,8 @@ app.use("/api/deposits", depositMemberRoutes);
 app.use("/api/admin/deposits", depositAdminRoutes);
 app.use("/api/withdrawals", withdrawalMemberRoutes);
 app.use("/api/admin/withdrawals", withdrawalAdminRoutes);
+app.use("/api/finance-facilities", financeFacilityMemberRoutes);
+app.use("/api/admin/finance-facilities", financeFacilityAdminRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: "Not found." });

@@ -1,8 +1,11 @@
 import { Router } from "express";
 import { body } from "express-validator";
-import * as depositController from "../controllers/deposit.controller.js";
+import * as depositControllerRaw from "../controllers/deposit.controller.js";
 import { requireAuth, requireAdmin } from "../middleware/auth.middleware.js";
 import { validate } from "../middleware/validate.middleware.js";
+import { wrapAsync } from "../middleware/asyncHandler.js";
+
+const depositController = wrapAsync(depositControllerRaw);
 
 const memberRouter = Router();
 const adminRouter = Router();

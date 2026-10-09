@@ -37,3 +37,21 @@ export function handleUploadErrors(req, res, next) {
     next(err);
   });
 }
+
+// Finance facility documents: one file per request (field name "document"),
+// uploaded individually per checklist item rather than all at once.
+const uploadFacilityDocument = multer({
+  storage: multer.memoryStorage(),
+  fileFilter,
+  limits: { fileSize: env.uploads.maxFileSizeMb * 1024 * 1024 },
+}).single("document");
+
+export function handleFacilityUploadErrors(req, res, next) {
+  uploadFacilityDocument(req, res, (err) => {
+    if (!err) return next();
+    if (err instanceof multer.MulterError || err.message) {
+      return res.status(422).json({ error: err.message || "Upload failed." });
+    }
+    next(err);
+  });
+}

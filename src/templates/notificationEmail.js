@@ -128,3 +128,51 @@ export function withdrawalProcessedEmail({ fullName, amount, bankName, accountNu
       calloutBox(`${escapeHtml(bankName)} · ${escapeHtml(accountNumber)}`, { tone: "success" }),
   });
 }
+
+// --- Business Finance Facility ---
+
+export function financeFacilitySubmittedAdminEmail({ memberName, memberEmail, amount }) {
+  return render({
+    subject: "New finance facility application — 363 Cooperative Society",
+    headingText: "A member applied for a Business Finance Facility",
+    bodyHtml:
+      paragraph(`<strong>${escapeHtml(memberName)}</strong> (${escapeHtml(memberEmail)}) requested <strong>${naira(amount)}</strong>.`) +
+      paragraph("Sign in to the admin dashboard to review the application.", { muted: true }),
+  });
+}
+
+export function financeFacilityInfoRequestedEmail({ fullName, request }) {
+  return render({
+    subject: "Action needed on your finance facility application — 363 Cooperative Society",
+    headingText: "We need a bit more information",
+    bodyHtml:
+      paragraph(`Hi ${escapeHtml(fullName.split(" ")[0])}, an officer reviewing your Business Finance Facility application needs more information:`) +
+      calloutBox(escapeHtml(request)) +
+      paragraph("Please sign in and respond to continue the review.", { muted: true }),
+  });
+}
+
+export function financeFacilityApprovedEmail({ fullName, requestedAmount, approvedAmount, termMonths, installmentAmount }) {
+  const sameAmount = Number(requestedAmount) === Number(approvedAmount);
+  return render({
+    subject: "Your finance facility application was approved — 363 Cooperative Society",
+    headingText: "Your Business Finance Facility was approved",
+    bodyHtml:
+      paragraph(`Hi ${escapeHtml(fullName.split(" ")[0])}, your application has been approved${sameAmount ? "" : " for a different amount than requested"}.`) +
+      calloutBox(
+        `${naira(approvedAmount)} · ${termMonths} months · ${naira(installmentAmount)}/installment`,
+        { tone: "success" }
+      ) +
+      paragraph("Sign in to review and accept the offer.", { muted: true }),
+  });
+}
+
+export function financeFacilityDeclinedEmail({ fullName, reason }) {
+  return render({
+    subject: "Your finance facility application was declined — 363 Cooperative Society",
+    headingText: "Your Business Finance Facility application was declined",
+    bodyHtml:
+      paragraph(`Hi ${escapeHtml(fullName.split(" ")[0])}, your application was not approved.`) +
+      calloutBox(escapeHtml(reason), { tone: "danger" }),
+  });
+}

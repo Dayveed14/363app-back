@@ -1,7 +1,10 @@
 import { Router } from "express";
 import { body } from "express-validator";
-import * as authController from "../controllers/auth.controller.js";
+import * as authControllerRaw from "../controllers/auth.controller.js";
+import { wrapAsync } from "../middleware/asyncHandler.js";
 import { validate } from "../middleware/validate.middleware.js";
+
+const authController = wrapAsync(authControllerRaw);
 import { authLimiter, otpLimiter } from "../middleware/rateLimit.middleware.js";
 import { requireAuth } from "../middleware/auth.middleware.js";
 import { OTP_PURPOSE } from "../services/otp.service.js";

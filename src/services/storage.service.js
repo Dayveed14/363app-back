@@ -17,12 +17,12 @@ cloudinary.config({
  * after it's re-run the owner-or-admin check in kyc.service.js. A public
  * Cloudinary URL for an ID document would defeat that check entirely.
  */
-export function uploadKycDocument(buffer, { userId, docType }) {
+function uploadDocument(buffer, { folder, publicId }) {
   return new Promise((resolve, reject) => {
     const stream = cloudinary.uploader.upload_stream(
       {
-        folder: `kyc/${userId}`,
-        public_id: `${docType}-${Date.now()}`,
+        folder,
+        public_id: publicId,
         resource_type: "auto", // images go in as "image"; PDFs land as "image" too (Cloudinary treats PDF as an image asset) unless Cloudinary decides otherwise for a given file
         type: "authenticated",
         overwrite: true,
@@ -30,6 +30,24 @@ export function uploadKycDocument(buffer, { userId, docType }) {
       (err, result) => (err ? reject(err) : resolve(result))
     );
     stream.end(buffer);
+  });
+}
+
+export function uploadKycDocument(buffer, { userId, docType }) {
+  return uploadDocument(buffer, { folder: `kyc/${userId}`, publicId: `${docType}-${Date.now()}` });
+}
+
+/**
+ * Same access-restricted upload as KYC documents, filed under
+ * finance-facility/<userId>/<applicationId> so a member's facility
+ * documents across multiple applications don't collide or get mixed up.
+ */
+export function uploadFacilityDocument(buffer, { userId, applicationId, documentType, originalName }) {
+  const ext = originalName.includes(".") ? originalName.split(".").pop() : "";
+  const safeType = documentType.replace(/[^a-z0-9_-]/gi, "");
+  return uploadDocument(buffer, {
+    folder: `finance-facility/${userId}/${applicationId}`,
+    publicId: `${safeType}-${Date.now()}${ext ? "." + ext : ""}`,
   });
 }
 
