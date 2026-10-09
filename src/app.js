@@ -12,6 +12,13 @@ import { financeFacilityMemberRoutes, financeFacilityAdminRoutes } from "./route
 
 export const app = express();
 
+
+const allowedOrigins = [
+  "http://localhost:5173",
+  "https://363app-front.vercel.app",
+  "https://localhost",
+];
+
 app.set("trust proxy", 1); // needed on Render so req.ip / rate limiting / Secure cookies see the real client connection
 
 app.use(helmet());
@@ -19,7 +26,13 @@ app.use(
   cors({
     // Must be an exact origin (not "*") for the browser to accept
     // credentialed (cookie-bearing) requests.
-    origin: env.clientOrigin,
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
     credentials: true,
   })
 );
