@@ -62,8 +62,38 @@ export async function incrementAttempts(otpId) {
   await pool.query(`UPDATE otps SET attempts = attempts + 1 WHERE id = :otpId`, { otpId });
 }
 
+/**
+ * Atomically reserves one verification attempt. The `attempts < max_attempts`
+ * check lives in the UPDATE itself, so N simultaneous guesses can't all read
+ * "0 attempts used" and all get checked — only max_attempts of them get a turn.
+ * Returns false if no attempt was available (exhausted, or already consumed).
+ */
+export async function claimAttempt(otpId) {
+  const [result] = await pool.query(
+    `UPDATE otps
+        SET attempts = attempts + 1
+      WHERE id = :otpId
+        AND attempts < max_attempts
+        AND consumed_at IS NULL
+        AND invalidated_at IS NULL`,
+    { otpId }
+  );
+  return result.affectedRows === 1;
+}
+
+/**
+ * Single-use enforcement. Conditional on the code still being unconsumed, and
+ * reports whether THIS call is the one that consumed it — two requests racing
+ * with the same correct code can't both succeed.
+ */
 export async function consumeOtp(otpId) {
-  await pool.query(`UPDATE otps SET consumed_at = NOW() WHERE id = :otpId`, { otpId });
+  const [result] = await pool.query(
+    `UPDATE otps
+        SET consumed_at = NOW()
+      WHERE id = :otpId AND consumed_at IS NULL AND invalidated_at IS NULL`,
+    { otpId }
+  );
+  return result.affectedRows === 1;
 }
 
 export async function invalidateOtp(otpId) {

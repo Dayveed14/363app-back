@@ -5,9 +5,13 @@ import * as paystack from "./paystack.service.js";
 import { notify } from "./notification.service.js";
 import { HttpError } from "../utils/errors.js";
 
+const MIN_DEPOSIT = 100; // naira — matches the UI's minimum and Paystack's practical floor
+const CURRENCY = "NGN";
+
 export async function initialize({ userId, amount }) {
-  if (!amount || amount <= 0) {
-    throw new HttpError(422, "invalid_amount", "Enter a valid deposit amount.");
+  amount = Math.round(Number(amount) * 100) / 100; // never store sub-kobo fractions
+  if (!Number.isFinite(amount) || amount < MIN_DEPOSIT) {
+    throw new HttpError(422, "invalid_amount", `The minimum deposit is ₦${MIN_DEPOSIT}.`);
   }
 
   const user = await userModel.findUserById(userId);
@@ -25,48 +29,77 @@ export async function initialize({ userId, amount }) {
 }
 
 /**
- * Called after Paystack redirects the member back. Verifies directly with
- * Paystack (never trusts the client) and applies exactly one of three
- * outcomes:
- *   - Paystack says failed  -> deposit marked 'failed', member notified in-app.
- *   - Paystack says success -> book_balance credited immediately, deposit
- *     moves to 'pending_confirmation', and an admin is emailed. This is the
- *     "book balance now, available balance after confirmation" split —
- *     the money is confirmed paid, but not yet reconciled by the cooperative.
+ * Called after Paystack redirects the member back. Never trusts the client:
+ * asks Paystack directly, then checks what Paystack says was ACTUALLY paid
+ * against OUR record of what this deposit was for.
+ *
+ *   success + amount/currency match -> credited ONCE (atomic claim, see
+ *       creditVerifiedDeposit): book_balance up, status pending_confirmation,
+ *       admins emailed.
+ *   success + mismatch              -> NOT credited; marked failed with a loud
+ *       server log so someone can reconcile it by hand.
+ *   failed / reversed               -> final: marked failed.
+ *   abandoned / pending / ongoing   -> NOT final. The payment may still
+ *       complete, so the deposit stays 'initialized' and can be re-checked.
+ *       (Marking it failed here would make a late-settling payment
+ *       impossible to credit.)
  */
-export async function verify(reference) {
+export async function verify({ reference, requester }) {
   const deposit = await depositModel.findByReference(reference);
   if (!deposit) throw new HttpError(404, "not_found", "Deposit not found.");
 
-  // Idempotent — Paystack's redirect and a page refresh can both call this.
+  if (deposit.user_id !== requester.id && requester.role !== "admin") {
+    throw new HttpError(403, "forbidden", "This isn't your deposit.");
+  }
+
+  // Cheap short-circuit for the common repeat call. NOT the safety mechanism —
+  // two simultaneous calls both get past this; the atomic claim below is what
+  // actually prevents a double credit.
   if (deposit.status !== "initialized") {
     return depositModel.toPublicDeposit(deposit);
   }
 
   const result = await paystack.verifyTransaction(reference);
 
-  if (!result.success) {
+  if (result.status === "success") {
+    const expectedKobo = Math.round(Number(deposit.amount) * 100);
+    if (result.currency !== CURRENCY || result.amountKobo !== expectedKobo) {
+      console.error(
+        `[deposit] AMOUNT/CURRENCY MISMATCH ref=${reference} expected=${expectedKobo} kobo ${CURRENCY}, ` +
+          `Paystack reports ${result.amountKobo} kobo ${result.currency} (paystack id ${result.paystackId}) — NOT credited, reconcile manually`
+      );
+      await depositModel.markFailed({
+        reference,
+        reason: "The amount received did not match this deposit, so it was not credited. Please contact the cooperative office.",
+        paystackRefId: result.paystackId,
+      });
+      return depositModel.toPublicDeposit(await depositModel.findByReference(reference));
+    }
+
+    const credited = await depositModel.creditVerifiedDeposit({ reference, paystackRefId: result.paystackId });
+    if (credited) {
+      const user = await userModel.findUserById(credited.userId);
+      notify
+        .depositPendingConfirmation({
+          memberName: user.full_name,
+          memberEmail: user.email,
+          amount: credited.amount,
+          reference,
+        })
+        .catch((err) => console.error("[deposit] admin notification failed:", err.message));
+    }
+    // credited === null means a concurrent request already handled it — fine.
+    return depositModel.toPublicDeposit(await depositModel.findByReference(reference));
+  }
+
+  if (result.status === "failed" || result.status === "reversed") {
     await depositModel.markFailed({
       reference,
       reason: result.gatewayResponse || "Payment was not successful.",
       paystackRefId: result.paystackId,
     });
-    return depositModel.toPublicDeposit(await depositModel.findByReference(reference));
   }
-
-  await depositModel.markPendingConfirmation({ reference, paystackRefId: result.paystackId });
-  await userModel.creditBookBalance(deposit.user_id, deposit.amount);
-
-  const user = await userModel.findUserById(deposit.user_id);
-  notify
-    .depositPendingConfirmation({
-      memberName: user.full_name,
-      memberEmail: user.email,
-      amount: deposit.amount,
-      reference,
-    })
-    .catch((err) => console.error("[deposit] admin notification failed:", err.message));
-
+  // anything else: not finished (yet) — leave it 'initialized'.
   return depositModel.toPublicDeposit(await depositModel.findByReference(reference));
 }
 
@@ -83,12 +116,16 @@ export async function listForAdmin(status) {
 export async function confirm({ depositId, reviewerId }) {
   const deposit = await depositModel.findById(depositId);
   if (!deposit) throw new HttpError(404, "not_found", "Deposit not found.");
-  if (deposit.status !== "pending_confirmation") {
-    throw new HttpError(409, "invalid_state", "Only deposits awaiting confirmation can be confirmed.");
+  if (deposit.user_id === reviewerId) {
+    throw new HttpError(403, "self_review", "You can't confirm your own deposit.");
   }
 
-  await userModel.moveBookToAvailable(deposit.user_id, deposit.amount);
-  await depositModel.markConfirmed({ id: depositId, reviewerId });
+  // The status + balance change happen in one atomic, conditional transaction
+  // (see depositModel.confirmDeposit) — a double-click can't credit twice.
+  const done = await depositModel.confirmDeposit({ id: depositId, reviewerId });
+  if (!done) {
+    throw new HttpError(409, "invalid_state", "This deposit isn't awaiting confirmation (it may already have been handled).");
+  }
 
   const user = await userModel.findUserById(deposit.user_id);
   notify
@@ -103,13 +140,14 @@ export async function decline({ depositId, reviewerId, reason }) {
 
   const deposit = await depositModel.findById(depositId);
   if (!deposit) throw new HttpError(404, "not_found", "Deposit not found.");
-  if (deposit.status !== "pending_confirmation") {
-    throw new HttpError(409, "invalid_state", "Only deposits awaiting confirmation can be declined.");
+  if (deposit.user_id === reviewerId) {
+    throw new HttpError(403, "self_review", "You can't decline your own deposit.");
   }
 
-  // Reverses the book_balance credit — it never reaches available_balance.
-  await userModel.reverseBookBalance(deposit.user_id, deposit.amount);
-  await depositModel.markDeclined({ id: depositId, reviewerId, reason });
+  const done = await depositModel.declineDeposit({ id: depositId, reviewerId, reason });
+  if (!done) {
+    throw new HttpError(409, "invalid_state", "This deposit isn't awaiting confirmation (it may already have been handled).");
+  }
 
   const user = await userModel.findUserById(deposit.user_id);
   notify

@@ -24,7 +24,7 @@ export async function initialize(req, res) {
 
 export async function verify(req, res) {
   try {
-    const deposit = await depositService.verify(req.params.reference);
+    const deposit = await depositService.verify({ reference: req.params.reference, requester: req.user });
     res.json({ deposit });
   } catch (err) {
     sendError(res, err);

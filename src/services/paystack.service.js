@@ -28,6 +28,7 @@ export async function initializeTransaction({ email, amountNaira, reference }) {
     body: JSON.stringify({
       email,
       amount: Math.round(amountNaira * 100),
+      currency: "NGN",
       reference,
       callback_url: env.paystack.callbackUrl,
     }),
@@ -44,8 +45,14 @@ export async function verifyTransaction(reference) {
   const data = await paystackFetch(`/transaction/verify/${encodeURIComponent(reference)}`);
   const tx = data.data;
   return {
+    // Raw Paystack status: success | failed | reversed | abandoned | pending |
+    // ongoing | processing | queued. Callers must decide per-status — only
+    // 'failed'/'reversed' are final; the rest just mean "not finished yet".
+    status: tx.status,
     success: tx.status === "success",
+    amountKobo: tx.amount,
     amountNaira: tx.amount / 100,
+    currency: tx.currency,
     paystackId: String(tx.id),
     gatewayResponse: tx.gateway_response,
   };

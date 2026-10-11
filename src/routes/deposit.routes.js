@@ -16,7 +16,7 @@ memberRouter.use(requireAuth);
 
 memberRouter.post(
   "/initialize",
-  [body("amount").isFloat({ gt: 0 }).withMessage("Enter a valid deposit amount.")],
+  [body("amount").isFloat({ min: 100 }).withMessage("The minimum deposit is ₦100.")],
   validate,
   depositController.initialize
 );

@@ -47,11 +47,19 @@ export async function verifyOtp({ userId, purpose, code }) {
     return { ok: false, reason: "too_many_attempts" };
   }
 
+  // Reserve an attempt BEFORE comparing, atomically. (Check-then-increment lets
+  // a burst of parallel guesses all slip past the cap.)
+  const claimed = await otpModel.claimAttempt(otp.id);
+  if (!claimed) {
+    await otpModel.invalidateOtp(otp.id);
+    return { ok: false, reason: "too_many_attempts" };
+  }
+  const attemptsUsed = otp.attempts + 1;
+
   const matches = verifyOtpHash(code, otp.otp_hash);
 
   if (!matches) {
-    await otpModel.incrementAttempts(otp.id);
-    const attemptsLeft = otp.max_attempts - (otp.attempts + 1);
+    const attemptsLeft = otp.max_attempts - attemptsUsed;
     if (attemptsLeft <= 0) {
       await otpModel.invalidateOtp(otp.id);
       return { ok: false, reason: "too_many_attempts" };
@@ -59,7 +67,10 @@ export async function verifyOtp({ userId, purpose, code }) {
     return { ok: false, reason: "incorrect", attemptsLeft };
   }
 
-  // Single-use: mark consumed immediately so a replayed code can never verify twice.
-  await otpModel.consumeOtp(otp.id);
+  // Single-use, enforced by the database: only the request whose UPDATE
+  // actually flips consumed_at succeeds. A concurrent duplicate with the same
+  // correct code loses here.
+  const consumed = await otpModel.consumeOtp(otp.id);
+  if (!consumed) return { ok: false, reason: "no_active_otp" };
   return { ok: true };
 }

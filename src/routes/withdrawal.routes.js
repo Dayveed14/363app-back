@@ -18,7 +18,7 @@ memberRouter.use(requireAuth);
 memberRouter.post(
   "/initiate",
   otpLimiter,
-  [body("amount").isFloat({ gt: 0 }).withMessage("Enter a valid withdrawal amount.")],
+  [body("amount").isFloat({ min: 100 }).withMessage("The minimum withdrawal is ₦100.")],
   validate,
   withdrawalController.initiate
 );

@@ -17,9 +17,12 @@ import { HttpError } from "../utils/errors.js";
  * confirmed (see confirm() below), so an abandoned request leaves no trace
  * and ties up no funds.
  */
+const MIN_WITHDRAWAL = 100; // naira — matches the UI's minimum
+
 export async function initiate({ userId, amount }) {
-  if (!amount || amount <= 0) {
-    throw new HttpError(422, "invalid_amount", "Enter a valid withdrawal amount.");
+  amount = Math.round(Number(amount) * 100) / 100; // never store sub-kobo fractions
+  if (!Number.isFinite(amount) || amount < MIN_WITHDRAWAL) {
+    throw new HttpError(422, "invalid_amount", `The minimum withdrawal is ₦${MIN_WITHDRAWAL}.`);
   }
 
   const user = await userModel.findUserById(userId);
@@ -87,20 +90,20 @@ export async function confirm({ pendingToken, code }) {
   });
   if (!result.ok) throw otpFailure(result);
 
-  const held = await userModel.holdAvailableBalance(user.id, payload.amount);
-  if (!held) {
-    // Balance moved between initiate and confirm (e.g. another withdrawal
-    // beat this one to it) — fail cleanly rather than going negative.
-    throw new HttpError(422, "insufficient_balance", "That's more than your available balance.");
-  }
-
-  const withdrawal = await withdrawalModel.create({
+  // Hold + record in one transaction (see createWithHold): no window where
+  // funds are held but no withdrawal exists, and the balance check is atomic.
+  const withdrawal = await withdrawalModel.createWithHold({
     userId: user.id,
     amount: payload.amount,
     bankName: payload.bankName,
     accountNumber: payload.accountNumber,
     accountName: payload.accountName,
   });
+  if (!withdrawal) {
+    // Balance moved between initiate and confirm (e.g. another withdrawal
+    // beat this one to it) — fail cleanly rather than going negative.
+    throw new HttpError(422, "insufficient_balance", "That's more than your available balance.");
+  }
 
   notify
     .withdrawalSubmitted({
@@ -132,7 +135,13 @@ export async function approve({ withdrawalId, reviewerId }) {
     throw new HttpError(409, "invalid_state", "Only pending withdrawals can be approved.");
   }
 
-  await withdrawalModel.markApproved({ id: withdrawalId, reviewerId });
+  if (withdrawal.user_id === reviewerId) {
+    throw new HttpError(403, "self_review", "You can't review your own withdrawal.");
+  }
+  const approved = await withdrawalModel.markApproved({ id: withdrawalId, reviewerId });
+  if (!approved) {
+    throw new HttpError(409, "invalid_state", "This withdrawal was already actioned.");
+  }
 
   const user = await userModel.findUserById(withdrawal.user_id);
   notify
@@ -153,8 +162,15 @@ export async function decline({ withdrawalId, reviewerId, reason }) {
 
   // Refund the hold — this is the only point a withdrawal's amount ever
   // moves a second time; approve/process never touch the balance again.
-  await userModel.refundAvailableBalance(withdrawal.user_id, withdrawal.amount);
-  await withdrawalModel.markDeclined({ id: withdrawalId, reviewerId, reason });
+  if (withdrawal.user_id === reviewerId) {
+    throw new HttpError(403, "self_review", "You can't review your own withdrawal.");
+  }
+  // Status change and refund are one atomic, conditional transaction — a
+  // double-click can't refund twice.
+  const declined = await withdrawalModel.declineAndRefund({ id: withdrawalId, reviewerId, reason });
+  if (!declined) {
+    throw new HttpError(409, "invalid_state", "This withdrawal was already actioned.");
+  }
 
   const user = await userModel.findUserById(withdrawal.user_id);
   notify
@@ -171,7 +187,13 @@ export async function process({ withdrawalId, processorId }) {
     throw new HttpError(409, "invalid_state", "Only approved withdrawals can be marked processed.");
   }
 
-  await withdrawalModel.markProcessed({ id: withdrawalId, processorId });
+  if (withdrawal.user_id === processorId) {
+    throw new HttpError(403, "self_review", "You can't process your own withdrawal.");
+  }
+  const processed = await withdrawalModel.markProcessed({ id: withdrawalId, processorId });
+  if (!processed) {
+    throw new HttpError(409, "invalid_state", "This withdrawal was already actioned.");
+  }
 
   const user = await userModel.findUserById(withdrawal.user_id);
   notify
