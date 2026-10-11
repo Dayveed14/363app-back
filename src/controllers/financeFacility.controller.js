@@ -135,3 +135,20 @@ export async function decline(req, res) {
     sendError(res, err);
   }
 }
+
+export async function disburse(req, res, next) {
+  try {
+    const application = await facilityService.disburse({
+      applicationId: req.params.id,
+      officerId: req.user.id,
+      disbursementReference: req.body?.disbursementReference,
+    });
+
+    return res.json({
+      message: "Finance facility disbursed successfully.",
+      application,
+    });
+  } catch (err) {
+    next(err);
+  }
+}

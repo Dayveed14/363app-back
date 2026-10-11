@@ -75,5 +75,9 @@ adminRouter.post(
   validate,
   controller.decline
 );
+adminRouter.post(
+  "/:id/disburse",
+  controller.disburse
+);
 
 export { memberRouter as financeFacilityMemberRoutes, adminRouter as financeFacilityAdminRoutes };

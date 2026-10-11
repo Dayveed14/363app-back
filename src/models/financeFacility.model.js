@@ -182,8 +182,47 @@ export function toPublicApplication(row) {
     additionalInformationRequest: row.additional_information_request,
     submittedAt: row.submitted_at,
     reviewedAt: row.reviewed_at,
+    disbursedAt: row.disbursed_at ?? null,
+    disbursedBy: row.disbursed_by ?? null,
+    disbursementReference: row.disbursement_reference ?? null,
     member: row.full_name
       ? { fullName: row.full_name, email: row.email, memberId: row.member_id }
       : undefined,
   };
+}
+
+export async function markDisbursed({
+  id,
+  officerId,
+  disbursementReference = null,
+}) {
+  const [result] = await pool.query(
+    `UPDATE finance_facility_applications
+        SET status = 'disbursed',
+            disbursed_at = NOW(),
+            disbursed_by = :officerId,
+            disbursement_reference = :disbursementReference
+      WHERE id = :id
+        AND status = 'approved'`,
+    {
+      id,
+      officerId,
+      disbursementReference,
+    }
+  );
+
+  return result.affectedRows === 1;
+}
+
+export async function findApprovedForDisbursement(id) {
+  const [rows] = await pool.query(
+    `SELECT *
+       FROM finance_facility_applications
+      WHERE id = :id
+        AND status = 'approved'
+      LIMIT 1`,
+    { id }
+  );
+
+  return rows[0] || null;
 }

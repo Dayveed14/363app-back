@@ -7,6 +7,7 @@ import * as withdrawalModel from "../models/withdrawal.model.js";
 import { uploadFacilityDocument, getSignedUrl } from "./storage.service.js";
 import { notify } from "./notification.service.js";
 import { HttpError } from "../utils/errors.js";
+import { generateRepaymentSchedule, } from "./financeFacilityRepayment.service.js";
 
 /**
  * Thresholds below encode real lending-risk judgment this codebase isn't
@@ -319,4 +320,117 @@ export async function decline({ applicationId, officerId, reason }) {
     .catch((err) => console.error("[finance-facility] member notification failed:", err.message));
 
   return getOne({ applicationId, requester: { id: officerId, role: "admin" } });
+}
+
+export async function disburse({
+  applicationId,
+  officerId,
+  disbursementReference,
+}) {
+  if (
+    !applicationId ||
+    !Number.isInteger(Number(applicationId)) ||
+    Number(applicationId) <= 0
+  ) {
+    throw new HttpError(
+      422,
+      "invalid_application_id",
+      "A valid finance facility application ID is required."
+    );
+  }
+
+  if (!officerId) {
+    throw new HttpError(
+      401,
+      "unauthorized",
+      "An authenticated officer is required to disburse a facility."
+    );
+  }
+
+  const application = await applicationModel.findById(applicationId);
+
+  if (!application) {
+    throw new HttpError(
+      404,
+      "not_found",
+      "Finance facility application not found."
+    );
+  }
+
+  if (application.status !== "approved") {
+    throw new HttpError(
+      409,
+      "invalid_state",
+      application.status === "disbursed"
+        ? "This finance facility has already been disbursed."
+        : "Only approved finance facilities can be disbursed."
+    );
+  }
+
+  if (
+    disbursementReference != null &&
+    (
+      typeof disbursementReference !== "string" ||
+      disbursementReference.trim().length > 100
+    )
+  ) {
+    throw new HttpError(
+      422,
+      "invalid_disbursement_reference",
+      "The disbursement reference must be a string of at most 100 characters."
+    );
+  }
+
+  const reference = disbursementReference?.trim() || null;
+
+  // 1. Mark the approved facility as disbursed.
+  const updated = await applicationModel.markDisbursed({
+    id: applicationId,
+    officerId,
+    disbursementReference: reference,
+  });
+
+  if (!updated) {
+    throw new HttpError(
+      409,
+      "invalid_state",
+      "This facility was changed by another request. Refresh and check its current status."
+    );
+  }
+
+  // 2. Generate the repayment schedule automatically.
+  let repaymentSchedule;
+
+  try {
+    repaymentSchedule = await generateRepaymentSchedule(
+      Number(applicationId)
+    );
+  } catch (error) {
+    // The facility has already been marked as disbursed.
+    // Do not pretend that schedule generation succeeded.
+    console.error(
+      `Repayment schedule generation failed for facility ${applicationId}:`,
+      error
+    );
+
+    throw new HttpError(
+      500,
+      "repayment_schedule_generation_failed",
+      "The facility was disbursed, but its repayment schedule could not be generated. Administrative reconciliation is required."
+    );
+  }
+
+  // 3. Return the updated application and repayment schedule.
+  const updatedApplication = await getOne({
+    applicationId,
+    requester: {
+      id: officerId,
+      role: "admin",
+    },
+  });
+
+  return {
+    ...updatedApplication,
+    repaymentSchedule,
+  };
 }
