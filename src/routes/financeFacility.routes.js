@@ -43,6 +43,8 @@ memberRouter.post(
   controller.addDocument
 );
 memberRouter.get("/:id/documents/:docId", controller.getDocument);
+memberRouter.post("/:id/offer/accept", controller.acceptOffer);
+memberRouter.post("/:id/offer/decline", controller.declineOffer);
 
 // --- Admin: /api/admin/finance-facilities ---
 

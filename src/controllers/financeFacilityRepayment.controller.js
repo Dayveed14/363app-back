@@ -2,23 +2,31 @@ import * as repaymentService from "../services/financeFacilityRepayment.service.
 import { pool } from "../config/db.js";
 
 /**
-
-* Send consistent API errors without exposing internal database details.
-  */
-  function handleError(res, error, fallbackMessage) {
-  const statusCode = Number(error.statusCode) || 500;
-
-if (statusCode >= 500) {
-console.error("[Finance Facility Repayment]", error);
+ * Consistent error body: `error` is what the frontend reads (same shape as
+ * every other API in this app); `message` is kept so older clients still work.
+ */
+function fail(res, statusCode, message, code) {
+  return res.status(statusCode).json({
+    success: false,
+    error: message,
+    message,
+    ...(code ? { code } : {}),
+  });
 }
 
-return res.status(statusCode).json({
-success: false,
-message:
-statusCode < 500
-? error.message
-: fallbackMessage || "An unexpected error occurred.",
-});
+function handleError(res, error, fallbackMessage) {
+  const statusCode = Number(error.statusCode) || 500;
+
+  if (statusCode >= 500) {
+    console.error("[Finance Facility Repayment]", error);
+  }
+
+  return fail(
+    res,
+    statusCode,
+    statusCode < 500 ? error.message : fallbackMessage || "An unexpected error occurred.",
+    statusCode < 500 ? error.code : undefined
+  );
 }
 
 /**
@@ -39,14 +47,22 @@ statusCode < 500
 * Return the authenticated member's disbursed facilities, balances,
 * next repayment due, and repayment history.
   */
-  export async function getMemberDashboard(req, res) {
+  function verifyMessage(result) {
+  if (result.status === "failed") return "Paystack reported this payment as failed.";
+  if (result.status === "pending_confirmation")
+    return result.alreadyProcessed
+      ? "This repayment is already awaiting admin confirmation."
+      : "Payment received. It will reflect on your facility once an admin confirms it.";
+  if (result.status === "success") return "This repayment has already been confirmed.";
+  if (result.status === "declined") return "This repayment was declined.";
+  return "Repayment checked.";
+}
+
+export async function getMemberDashboard(req, res) {
   const userId = getUserId(req);
 
 if (!userId) {
-return res.status(401).json({
-success: false,
-message: "Authentication required.",
-});
+return fail(res, 401, "Authentication required.");
 }
 
 try {
@@ -56,7 +72,7 @@ const [facilities] = await pool.query(
               disbursed_at, disbursement_reference
        FROM finance_facility_applications
        WHERE user_id = :userId
-         AND status = 'disbursed'
+         AND status IN ('disbursed', 'completed')
        ORDER BY disbursed_at DESC, id DESC`,
 { userId }
 );
@@ -132,10 +148,7 @@ error,
   const { facilityId } = req.params;
 
 if (!userId) {
-return res.status(401).json({
-success: false,
-message: "Authentication required.",
-});
+return fail(res, 401, "Authentication required.");
 }
 
 try {
@@ -171,10 +184,7 @@ error,
   const { facilityId } = req.params;
 
 if (!userId) {
-return res.status(401).json({
-success: false,
-message: "Authentication required.",
-});
+return fail(res, 401, "Authentication required.");
 }
 
 try {
@@ -209,10 +219,7 @@ error,
   const userId = getUserId(req);
 
 if (!userId) {
-return res.status(401).json({
-success: false,
-message: "Authentication required.",
-});
+return fail(res, 401, "Authentication required.");
 }
 
 try {
@@ -256,10 +263,7 @@ error,
   const { amount, callbackUrl } = req.body ?? {};
 
 if (!userId) {
-return res.status(401).json({
-success: false,
-message: "Authentication required.",
-});
+return fail(res, 401, "Authentication required.");
 }
 
 if (
@@ -269,10 +273,7 @@ amount === "" ||
 !Number.isFinite(Number(amount)) ||
 Number(amount) <= 0
 ) {
-return res.status(400).json({
-success: false,
-message: "Enter a valid repayment amount.",
-});
+return fail(res, 400, "Enter a valid repayment amount.");
 }
 
 try {
@@ -288,17 +289,11 @@ const [users] = await pool.query(
 const member = users[0];
 
 if (!member) {
-  return res.status(404).json({
-    success: false,
-    message: "Member account not found.",
-  });
+  return fail(res, 404, "Member account not found.");
 }
 
 if (!member.email) {
-  return res.status(400).json({
-    success: false,
-    message: "A valid email address is required for payment.",
-  });
+  return fail(res, 400, "A valid email address is required for payment.");
 }
 
 const payment = await repaymentService.initializeRepayment({
@@ -341,20 +336,14 @@ error,
   const { reference } = req.body ?? {};
 
 if (!userId) {
-return res.status(401).json({
-success: false,
-message: "Authentication required.",
-});
+return fail(res, 401, "Authentication required.");
 }
 
 if (
 typeof reference !== "string" ||
 reference.trim().length === 0
 ) {
-return res.status(400).json({
-success: false,
-message: "A valid Paystack reference is required.",
-});
+return fail(res, 400, "A valid Paystack reference is required.");
 }
 
 try {
@@ -367,9 +356,7 @@ userId,
 
 return res.json({
   success: true,
-  message: result.alreadyProcessed
-    ? "This repayment has already been processed."
-    : "Repayment verified and processed successfully.",
+  message: verifyMessage(result),
   data: result,
 });
 
@@ -403,15 +390,14 @@ error,
 
 const allowedStatuses = new Set([
 "pending",
+"pending_confirmation",
 "success",
+"declined",
 "failed",
 ]);
 
 if (status && !allowedStatuses.has(status)) {
-return res.status(400).json({
-success: false,
-message: "Invalid repayment status filter.",
-});
+return fail(res, 400, "Invalid repayment status filter.");
 }
 
 try {
@@ -453,10 +439,7 @@ if (
 typeof reference !== "string" ||
 reference.trim().length === 0
 ) {
-return res.status(400).json({
-success: false,
-message: "A valid Paystack reference is required.",
-});
+return fail(res, 400, "A valid Paystack reference is required.");
 }
 
 try {
@@ -468,9 +451,7 @@ paystackReference: reference.trim(),
 
 return res.json({
   success: true,
-  message: result.alreadyProcessed
-    ? "This repayment has already been processed."
-    : "Repayment verified and processed successfully.",
+  message: verifyMessage(result),
   data: result,
 });
 
@@ -514,4 +495,45 @@ error,
 "Unable to generate the repayment schedule."
 );
 }
+}
+
+
+/**
+ * POST /api/finance-facility-repayments/admin/:repaymentId/confirm
+ * Admin confirms receipt; the schedule allocation runs in this step.
+ */
+export async function confirmAdminRepayment(req, res) {
+  try {
+    const result = await repaymentService.confirmRepayment({
+      repaymentId: Number(req.params.repaymentId),
+      adminId: getUserId(req),
+    });
+    return res.json({
+      success: true,
+      message:
+        result.outcome === "declined"
+          ? "The payment exceeded the outstanding balance, so it was declined."
+          : "Repayment confirmed and applied.",
+      data: result,
+    });
+  } catch (error) {
+    return handleError(res, error, "Unable to confirm the repayment.");
+  }
+}
+
+/**
+ * POST /api/finance-facility-repayments/admin/:repaymentId/decline
+ * Body: { reason }
+ */
+export async function declineAdminRepayment(req, res) {
+  try {
+    const result = await repaymentService.declineRepayment({
+      repaymentId: Number(req.params.repaymentId),
+      adminId: getUserId(req),
+      reason: req.body?.reason,
+    });
+    return res.json({ success: true, message: "Repayment declined.", data: result });
+  } catch (error) {
+    return handleError(res, error, "Unable to decline the repayment.");
+  }
 }

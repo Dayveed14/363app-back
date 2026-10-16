@@ -10,6 +10,8 @@ import {
   getAdminRepaymentHistory,
   verifyAdminRepayment,
   generateAdminRepaymentSchedule,
+  confirmAdminRepayment,
+  declineAdminRepayment,
 } from "../controllers/financeFacilityRepayment.controller.js";
 
 import {
@@ -56,6 +58,20 @@ router.post(
   requireAuth,
   requireAdmin,
   verifyAdminRepayment
+);
+
+router.post(
+  "/admin/:repaymentId/confirm",
+  requireAuth,
+  requireAdmin,
+  confirmAdminRepayment
+);
+
+router.post(
+  "/admin/:repaymentId/decline",
+  requireAuth,
+  requireAdmin,
+  declineAdminRepayment
 );
 
 router.post(

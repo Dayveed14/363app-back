@@ -71,7 +71,7 @@ export async function findActiveByUser(userId) {
   const [rows] = await pool.query(
     `SELECT * FROM finance_facility_applications
       WHERE user_id = :userId
-        AND status IN ('submitted', 'under_review', 'additional_information_required', 'approved')
+        AND status IN ('submitted', 'under_review', 'additional_information_required', 'approved', 'offer_accepted', 'disbursed')
       ORDER BY submitted_at DESC
       LIMIT 1`,
     { userId }
@@ -182,6 +182,8 @@ export function toPublicApplication(row) {
     additionalInformationRequest: row.additional_information_request,
     submittedAt: row.submitted_at,
     reviewedAt: row.reviewed_at,
+    offerAcceptedAt: row.offer_accepted_at ?? null,
+    offerDeclinedAt: row.offer_declined_at ?? null,
     disbursedAt: row.disbursed_at ?? null,
     disbursedBy: row.disbursed_by ?? null,
     disbursementReference: row.disbursement_reference ?? null,
@@ -203,7 +205,7 @@ export async function markDisbursed({
             disbursed_by = :officerId,
             disbursement_reference = :disbursementReference
       WHERE id = :id
-        AND status = 'approved'`,
+        AND status = 'offer_accepted'`,
     {
       id,
       officerId,
@@ -216,13 +218,35 @@ export async function markDisbursed({
 
 export async function findApprovedForDisbursement(id) {
   const [rows] = await pool.query(
-    `SELECT *
-       FROM finance_facility_applications
-      WHERE id = :id
-        AND status = 'approved'
+    `SELECT a.*, u.full_name, u.email, u.member_id
+       FROM finance_facility_applications a
+       JOIN users u ON u.id = a.user_id
+      WHERE a.id = :id
+        AND a.status = 'offer_accepted'
       LIMIT 1`,
     { id }
   );
 
   return rows[0] || null;
+}
+
+
+export async function markOfferAccepted({ id, userId }) {
+  const [result] = await pool.query(
+    `UPDATE finance_facility_applications
+        SET status = 'offer_accepted', offer_accepted_at = NOW()
+      WHERE id = :id AND user_id = :userId AND status = 'approved'`,
+    { id, userId }
+  );
+  return result.affectedRows === 1;
+}
+
+export async function markOfferDeclined({ id, userId }) {
+  const [result] = await pool.query(
+    `UPDATE finance_facility_applications
+        SET status = 'offer_declined', offer_declined_at = NOW()
+      WHERE id = :id AND user_id = :userId AND status = 'approved'`,
+    { id, userId }
+  );
+  return result.affectedRows === 1;
 }

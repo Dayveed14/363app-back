@@ -152,3 +152,19 @@ export async function disburse(req, res, next) {
     next(err);
   }
 }
+
+export async function acceptOffer(req, res) {
+  const application = await facilityService.acceptOffer({
+    applicationId: Number(req.params.id),
+    userId: req.user.id,
+  });
+  res.json({ message: "Offer accepted. An officer will now disburse the facility.", application });
+}
+
+export async function declineOffer(req, res) {
+  const application = await facilityService.declineOffer({
+    applicationId: Number(req.params.id),
+    userId: req.user.id,
+  });
+  res.json({ message: "Offer declined.", application });
+}

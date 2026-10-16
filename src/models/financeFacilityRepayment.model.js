@@ -32,7 +32,7 @@ export async function findFacilityById(id, userId = null, connection = null) {
      FROM finance_facility_applications a
      JOIN users u ON u.id = a.user_id
      WHERE a.id = :id
-       AND a.status = 'disbursed'
+       AND a.status IN ('disbursed', 'completed')
        AND (:userId IS NULL OR a.user_id = :userId)
      LIMIT 1`,
     { id, userId }
@@ -59,7 +59,7 @@ export async function listDisbursedFacilitiesByUser(
      FROM finance_facility_applications a
      JOIN users u ON u.id = a.user_id
      WHERE a.user_id = :userId
-       AND a.status = 'disbursed'
+       AND a.status IN ('disbursed', 'completed')
      ORDER BY a.disbursed_at DESC, a.id DESC`,
     { userId }
   );
@@ -224,7 +224,7 @@ export async function listOutstandingSchedulesByUser(
      JOIN finance_facility_applications a
        ON a.id = s.facility_id
      WHERE s.user_id = :userId
-       AND a.status = 'disbursed'
+       AND a.status IN ('disbursed', 'completed')
        AND s.amount_paid < s.amount_due
      ORDER BY s.due_date ASC, s.id ASC`,
     { userId }
@@ -446,40 +446,79 @@ export async function updateScheduleInstallmentPayment(
 }
 
 /**
- * Mark a repayment successful after Paystack verification.
- *
- * This is a database update, not payment verification.
- * Only call it after the service verifies the transaction with Paystack.
+ * Paystack has verified the payment. It is NOT applied to the schedule yet:
+ * it waits for an admin to confirm receipt (same model as deposits).
  */
-export async function markRepaymentSuccessful(
-  {
-    id,
-    paidAt = new Date(),
-  },
-  connection
-) {
-  if (!connection) {
-    throw new Error(
-      "A transaction connection is required to finalize a repayment."
-    );
-  }
-
+export async function markRepaymentPendingConfirmation({ id, paidAt = new Date() }, connection) {
+  if (!connection) throw new Error("A transaction connection is required.");
   const [result] = await connection.query(
     `UPDATE finance_facility_repayments
-     SET status = 'success',
-         paid_at = :paidAt
-     WHERE id = :id
-       AND status = 'pending'`,
+        SET status = 'pending_confirmation', paid_at = :paidAt
+      WHERE id = :id AND status = 'pending'`,
     { id, paidAt }
   );
+  return result.affectedRows === 1;
+}
 
-  if (result.affectedRows !== 1) {
-    throw new Error(
-      "The repayment is not pending or has already been processed."
-    );
-  }
+export async function markRepaymentFailed({ id, reason }, connection = null) {
+  const [result] = await getExecutor(connection).query(
+    `UPDATE finance_facility_repayments
+        SET status = 'failed', failure_reason = :reason
+      WHERE id = :id AND status = 'pending'`,
+    { id, reason: String(reason || "Payment failed").slice(0, 255) }
+  );
+  return result.affectedRows === 1;
+}
 
-  return findRepaymentById(id, connection);
+export async function markRepaymentConfirmed({ id, adminId }, connection) {
+  if (!connection) throw new Error("A transaction connection is required.");
+  const [result] = await connection.query(
+    `UPDATE finance_facility_repayments
+        SET status = 'success', confirmed_by = :adminId, confirmed_at = NOW()
+      WHERE id = :id AND status = 'pending_confirmation'`,
+    { id, adminId }
+  );
+  return result.affectedRows === 1;
+}
+
+export async function markRepaymentDeclined({ id, adminId, reason }, connection) {
+  if (!connection) throw new Error("A transaction connection is required.");
+  const [result] = await connection.query(
+    `UPDATE finance_facility_repayments
+        SET status = 'declined', decline_reason = :reason,
+            confirmed_by = :adminId, confirmed_at = NOW()
+      WHERE id = :id AND status = 'pending_confirmation'`,
+    { id, adminId, reason: String(reason).slice(0, 500) }
+  );
+  return result.affectedRows === 1;
+}
+
+export async function markFacilityCompleted(facilityId, connection) {
+  const [result] = await connection.query(
+    `UPDATE finance_facility_applications
+        SET status = 'completed'
+      WHERE id = :facilityId AND status = 'disbursed'`,
+    { facilityId }
+  );
+  return result.affectedRows === 1;
+}
+
+/**
+ * Sum of money that is paid-but-unconfirmed, or initialized recently and
+ * possibly mid-payment. Used to cap new payments so the total in flight
+ * can never exceed the outstanding balance. Stale 'pending' rows (an
+ * abandoned checkout) stop counting after an hour.
+ */
+export async function sumInFlightRepayments(facilityId, connection = null) {
+  const [rows] = await getExecutor(connection).query(
+    `SELECT COALESCE(SUM(amount), 0.00) AS total
+       FROM finance_facility_repayments
+      WHERE facility_id = :facilityId
+        AND (status = 'pending_confirmation'
+             OR (status = 'pending' AND created_at > (NOW() - INTERVAL 1 HOUR)))`,
+    { facilityId }
+  );
+  return rows[0]?.total ?? "0.00";
 }
 
 /**
@@ -522,8 +561,8 @@ export async function listSuccessfulRepaymentsByUser(
      JOIN finance_facility_applications a
        ON a.id = r.facility_id
      WHERE r.user_id = :userId
-       AND r.status = 'success'
-     ORDER BY r.paid_at DESC, r.id DESC`,
+       AND r.status IN ('pending_confirmation', 'success', 'declined', 'failed')
+     ORDER BY r.created_at DESC, r.id DESC`,
     { userId }
   );
 

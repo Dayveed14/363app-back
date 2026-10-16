@@ -35,4 +35,11 @@ export const notify = {
     notifyMember(email, templates.financeFacilityInfoRequestedEmail, data),
   financeFacilityApproved: (email, data) => notifyMember(email, templates.financeFacilityApprovedEmail, data),
   financeFacilityDeclined: (email, data) => notifyMember(email, templates.financeFacilityDeclinedEmail, data),
+  financeFacilityOfferAccepted: (data) => notifyAdmins(templates.financeFacilityOfferAcceptedAdminEmail, data),
+  financeFacilityOfferDeclined: (data) => notifyAdmins(templates.financeFacilityOfferDeclinedAdminEmail, data),
+  financeFacilityDisbursed: (email, data) => notifyMember(email, templates.financeFacilityDisbursedEmail, data),
+
+  repaymentSubmitted: (data) => notifyAdmins(templates.repaymentSubmittedAdminEmail, data),
+  repaymentConfirmed: (email, data) => notifyMember(email, templates.repaymentConfirmedEmail, data),
+  repaymentDeclined: (email, data) => notifyMember(email, templates.repaymentDeclinedEmail, data),
 };

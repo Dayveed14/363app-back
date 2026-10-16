@@ -9,6 +9,7 @@ import { kycMemberRoutes, kycAdminRoutes } from "./routes/kyc.routes.js";
 import { depositMemberRoutes, depositAdminRoutes } from "./routes/deposit.routes.js";
 import { withdrawalMemberRoutes, withdrawalAdminRoutes } from "./routes/withdrawal.routes.js";
 import { financeFacilityMemberRoutes, financeFacilityAdminRoutes } from "./routes/financeFacility.routes.js";
+import { HttpError } from "./utils/errors.js";
 import financeFacilityRepaymentRoutes from "./routes/financeFacilityRepayment.routes.js";
 
 export const app = express();
@@ -63,6 +64,12 @@ app.use((req, res) => {
 // Global error handler — last middleware.
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
+  if (err instanceof HttpError) {
+    return res.status(err.status).json({ error: err.message, code: err.code });
+  }
+  if (err && err.message === "Not allowed by CORS") {
+    return res.status(403).json({ error: "Not allowed by CORS." });
+  }
   console.error("[unhandled error]", err);
   res.status(500).json({ error: "Something went wrong. Please try again." });
 });

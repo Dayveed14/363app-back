@@ -16,6 +16,12 @@ import { generateRepaymentSchedule, } from "./financeFacilityRepayment.service.j
  * product can tune them without hunting through the service. Treat the
  * current values as reasonable placeholders, not settled policy.
  */
+function assertNotSelf(application, officerId) {
+  if (Number(application.user_id) === Number(officerId)) {
+    throw new HttpError(403, "self_review", "You can't review or action your own application.");
+  }
+}
+
 const ELIGIBILITY_RULES = {
   MIN_MEMBERSHIP_MONTHS: 3,
   MIN_CONFIRMED_DEPOSITS: 3,
@@ -247,6 +253,7 @@ export async function requestMoreInfo({ applicationId, officerId, request }) {
 
   const application = await applicationModel.findById(applicationId);
   if (!application) throw new HttpError(404, "not_found", "Application not found.");
+  assertNotSelf(application, officerId);
   if (!["submitted", "under_review"].includes(application.status)) {
     throw new HttpError(409, "invalid_state", "This application isn't awaiting initial review.");
   }
@@ -272,6 +279,7 @@ export async function approve({
 }) {
   const application = await applicationModel.findById(applicationId);
   if (!application) throw new HttpError(404, "not_found", "Application not found.");
+  assertNotSelf(application, officerId);
   if (!["submitted", "under_review", "additional_information_required"].includes(application.status)) {
     throw new HttpError(409, "invalid_state", "This application has already been decided.");
   }
@@ -308,6 +316,7 @@ export async function decline({ applicationId, officerId, reason }) {
 
   const application = await applicationModel.findById(applicationId);
   if (!application) throw new HttpError(404, "not_found", "Application not found.");
+  assertNotSelf(application, officerId);
   if (!["submitted", "under_review", "additional_information_required"].includes(application.status)) {
     throw new HttpError(409, "invalid_state", "This application has already been decided.");
   }
@@ -357,13 +366,19 @@ export async function disburse({
     );
   }
 
-  if (application.status !== "approved") {
+  assertNotSelf(application, officerId);
+
+  if (application.status !== "offer_accepted") {
+    const messages = {
+      disbursed: "This finance facility has already been disbursed.",
+      completed: "This finance facility has already been disbursed and repaid.",
+      approved: "The member has not accepted this offer yet.",
+      offer_declined: "The member declined this offer.",
+    };
     throw new HttpError(
       409,
       "invalid_state",
-      application.status === "disbursed"
-        ? "This finance facility has already been disbursed."
-        : "Only approved finance facilities can be disbursed."
+      messages[application.status] || "Only accepted offers can be disbursed."
     );
   }
 
@@ -420,6 +435,13 @@ export async function disburse({
     );
   }
 
+  notify
+    .financeFacilityDisbursed(application.email, {
+      fullName: application.full_name,
+      amount: application.approved_amount,
+    })
+    .catch((err) => console.error("[finance-facility] member notification failed:", err.message));
+
   // 3. Return the updated application and repayment schedule.
   const updatedApplication = await getOne({
     applicationId,
@@ -433,4 +455,48 @@ export async function disburse({
     ...updatedApplication,
     repaymentSchedule,
   };
+}
+
+
+async function requireOwnApprovedOffer(applicationId, userId) {
+  const application = await applicationModel.findById(applicationId);
+  if (!application || Number(application.user_id) !== Number(userId)) {
+    throw new HttpError(404, "not_found", "Application not found.");
+  }
+  if (application.status !== "approved") {
+    throw new HttpError(409, "invalid_state", "There is no open offer to respond to on this application.");
+  }
+  return application;
+}
+
+export async function acceptOffer({ applicationId, userId }) {
+  const application = await requireOwnApprovedOffer(applicationId, userId);
+  const ok = await applicationModel.markOfferAccepted({ id: applicationId, userId });
+  if (!ok) throw new HttpError(409, "invalid_state", "This offer has already been responded to.");
+
+  notify
+    .financeFacilityOfferAccepted({
+      memberName: application.full_name,
+      memberEmail: application.email,
+      amount: application.approved_amount,
+    })
+    .catch((err) => console.error("[finance-facility] admin notification failed:", err.message));
+
+  return getOne({ applicationId, requester: { id: userId, role: "member" } });
+}
+
+export async function declineOffer({ applicationId, userId }) {
+  const application = await requireOwnApprovedOffer(applicationId, userId);
+  const ok = await applicationModel.markOfferDeclined({ id: applicationId, userId });
+  if (!ok) throw new HttpError(409, "invalid_state", "This offer has already been responded to.");
+
+  notify
+    .financeFacilityOfferDeclined({
+      memberName: application.full_name,
+      memberEmail: application.email,
+      amount: application.approved_amount,
+    })
+    .catch((err) => console.error("[finance-facility] admin notification failed:", err.message));
+
+  return getOne({ applicationId, requester: { id: userId, role: "member" } });
 }

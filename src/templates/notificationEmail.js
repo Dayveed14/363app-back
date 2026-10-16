@@ -176,3 +176,64 @@ export function financeFacilityDeclinedEmail({ fullName, reason }) {
       calloutBox(escapeHtml(reason), { tone: "danger" }),
   });
 }
+
+
+export function financeFacilityOfferAcceptedAdminEmail({ memberName, memberEmail, amount }) {
+  return render({
+    subject: "Finance facility offer accepted — 363 Cooperative Society",
+    headingText: "A member accepted their facility offer",
+    bodyHtml:
+      paragraph(`<strong>${escapeHtml(memberName)}</strong> (${escapeHtml(memberEmail)}) accepted the offer of <strong>${naira(amount)}</strong>.`) +
+      paragraph("The facility is ready to be disbursed from the admin dashboard.", { muted: true }),
+  });
+}
+
+export function financeFacilityOfferDeclinedAdminEmail({ memberName, memberEmail, amount }) {
+  return render({
+    subject: "Finance facility offer declined — 363 Cooperative Society",
+    headingText: "A member declined their facility offer",
+    bodyHtml:
+      paragraph(`<strong>${escapeHtml(memberName)}</strong> (${escapeHtml(memberEmail)}) declined the offer of <strong>${naira(amount)}</strong>. No further action is needed.`),
+  });
+}
+
+export function financeFacilityDisbursedEmail({ fullName, amount }) {
+  return render({
+    subject: "Your finance facility has been disbursed — 363 Cooperative Society",
+    headingText: "Your facility has been disbursed",
+    bodyHtml:
+      paragraph(`Hi ${escapeHtml(fullName.split(" ")[0])}, <strong>${naira(amount)}</strong> has been released to you.`) +
+      paragraph("Sign in to view your repayment schedule.", { muted: true }),
+  });
+}
+
+export function repaymentSubmittedAdminEmail({ memberName, memberEmail, amount, reference }) {
+  return render({
+    subject: "Loan repayment awaiting confirmation — 363 Cooperative Society",
+    headingText: "A loan repayment needs confirmation",
+    bodyHtml:
+      paragraph(`<strong>${escapeHtml(memberName)}</strong> (${escapeHtml(memberEmail)}) paid <strong>${naira(amount)}</strong> towards their facility (ref ${escapeHtml(reference)}).`) +
+      paragraph("Confirm receipt from the admin repayments page to apply it to their schedule.", { muted: true }),
+  });
+}
+
+export function repaymentConfirmedEmail({ fullName, amount, completed }) {
+  return render({
+    subject: "Repayment confirmed — 363 Cooperative Society",
+    headingText: completed ? "Your facility is fully repaid" : "Your repayment was confirmed",
+    bodyHtml:
+      paragraph(`Hi ${escapeHtml(fullName.split(" ")[0])}, we confirmed your repayment of <strong>${naira(amount)}</strong>.`) +
+      (completed ? calloutBox("Your facility is now fully repaid. Thank you.", { tone: "success" }) : ""),
+  });
+}
+
+export function repaymentDeclinedEmail({ fullName, amount, reason }) {
+  return render({
+    subject: "Repayment not applied — 363 Cooperative Society",
+    headingText: "Your repayment could not be applied",
+    bodyHtml:
+      paragraph(`Hi ${escapeHtml(fullName.split(" ")[0])}, your repayment of <strong>${naira(amount)}</strong> was not applied to your facility.`) +
+      calloutBox(escapeHtml(reason), { tone: "danger" }) +
+      paragraph("Please contact the cooperative about the payment.", { muted: true }),
+  });
+}

@@ -1,15 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { pool } from "../config/db.js";
 import * as repaymentModel from "../models/financeFacilityRepayment.model.js";
+import { notify } from "./notification.service.js";
 
 const PAYSTACK_BASE_URL = "https://api.paystack.co";
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
 
 export class FinanceFacilityRepaymentError extends Error {
-  constructor(message, statusCode = 400) {
+  constructor(message, statusCode = 400, code = "repayment_error") {
     super(message);
     this.name = "FinanceFacilityRepaymentError";
     this.statusCode = statusCode;
+    this.code = code;
   }
 }
 
@@ -444,9 +446,28 @@ export async function initializeRepayment({
     );
   }
 
-  if (amountKobo > outstandingKobo) {
+  // Money already paid and awaiting admin confirmation (or mid-checkout)
+  // counts against the balance, so in-flight payments can never add up to
+  // more than is owed.
+  const inFlightKobo = toKobo(
+    await repaymentModel.sumInFlightRepayments(facilityId),
+    { allowZero: true }
+  );
+  const payableKobo = Math.max(outstandingKobo - inFlightKobo, 0);
+
+  if (payableKobo === 0) {
     throw new FinanceFacilityRepaymentError(
-      "Payment amount exceeds the outstanding balance."
+      "Payments already submitted cover the full outstanding balance. Please wait for them to be confirmed.",
+      409,
+      "balance_covered"
+    );
+  }
+
+  if (amountKobo > payableKobo) {
+    throw new FinanceFacilityRepaymentError(
+      `Payment amount exceeds what you can still pay (₦${fromKobo(payableKobo)}), after payments awaiting confirmation.`,
+      409,
+      "amount_exceeds_payable"
     );
   }
 
@@ -478,16 +499,45 @@ export async function initializeRepayment({
     );
   }
 
+  const lockConn = await pool.getConnection();
   try {
-    await repaymentModel.createRepayment({
+    await lockConn.beginTransaction();
+    await lockConn.query(
+      `SELECT id FROM finance_facility_applications WHERE id = :facilityId FOR UPDATE`,
+      { facilityId }
+    );
+    const lockedTotals = await repaymentModel.getFacilityRepaymentTotals(
       facilityId,
       userId,
-      paystackReference: initialization.reference,
-      amount: fromKobo(amountKobo),
-      currency: "NGN",
-      status: "pending",
-    });
+      lockConn
+    );
+    const lockedOutstanding = toKobo(lockedTotals.outstandingBalance, { allowZero: true });
+    const lockedInFlight = toKobo(
+      await repaymentModel.sumInFlightRepayments(facilityId, lockConn),
+      { allowZero: true }
+    );
+    if (amountKobo > lockedOutstanding - lockedInFlight) {
+      throw new FinanceFacilityRepaymentError(
+        "Another payment was just submitted for this facility. Refresh and try again.",
+        409,
+        "amount_exceeds_payable"
+      );
+    }
+    await repaymentModel.createRepayment(
+      {
+        facilityId,
+        userId,
+        paystackReference: initialization.reference,
+        amount: fromKobo(amountKobo),
+        currency: "NGN",
+        status: "pending",
+      },
+      lockConn
+    );
+    await lockConn.commit();
   } catch (error) {
+    await lockConn.rollback();
+    if (error instanceof FinanceFacilityRepaymentError) throw error;
     const existing =
       await repaymentModel.findRepaymentByPaystackReference(
         initialization.reference
@@ -501,6 +551,8 @@ export async function initializeRepayment({
     ) {
       throw error;
     }
+  } finally {
+    lockConn.release();
   }
 
   return {
@@ -510,12 +562,39 @@ export async function initializeRepayment({
   };
 }
 
+async function getMemberContact(userId) {
+  const [rows] = await pool.query(
+    `SELECT full_name, email FROM users WHERE id = :userId LIMIT 1`,
+    { userId }
+  );
+  return rows[0] || null;
+}
+
+function fireAndLog(promise, label) {
+  Promise.resolve(promise).catch((err) =>
+    console.error(`[repayment] ${label} notification failed:`, err.message)
+  );
+}
+
+function publicRepayment(r, extra = {}) {
+  return {
+    success: true,
+    repaymentId: Number(r.id),
+    facilityId: Number(r.facility_id),
+    amount: moneyNumber(r.amount),
+    reference: r.paystack_reference,
+    status: r.status,
+    ...extra,
+  };
+}
+
 /**
- * Verify and apply a Paystack payment.
- *
- * Paystack verification occurs before the database transaction.
- * The database then locks the repayment record, facility, and outstanding
- * installments before applying any balance changes.
+ * Verify a Paystack payment. Nothing is applied to the repayment schedule
+ * here: a verified payment moves to 'pending_confirmation' and waits for an
+ * admin to confirm receipt (the same model as deposits). A payment Paystack
+ * reports as failed/reversed is recorded as 'failed'. Payments Paystack still
+ * reports as pending/abandoned are left untouched so the member can retry
+ * verification.
  */
 export async function verifyAndProcessRepayment({
   paystackReference,
@@ -523,10 +602,7 @@ export async function verifyAndProcessRepayment({
 }) {
   assertPaystackConfigured();
 
-  if (
-    typeof paystackReference !== "string" ||
-    !paystackReference.trim()
-  ) {
+  if (typeof paystackReference !== "string" || !paystackReference.trim()) {
     throw new FinanceFacilityRepaymentError(
       "Paystack transaction reference is required."
     );
@@ -545,74 +621,70 @@ export async function verifyAndProcessRepayment({
     );
   }
 
-  if (payment.status !== "success") {
+  const isFinalFailure = payment.status === "failed" || payment.status === "reversed";
+
+  if (payment.status !== "success" && !isFinalFailure) {
     throw new FinanceFacilityRepaymentError(
-      "Paystack has not confirmed a successful payment."
+      "Paystack has not confirmed this payment yet.",
+      409,
+      "payment_not_complete"
     );
   }
 
-  if (payment.currency !== "NGN") {
-    throw new FinanceFacilityRepaymentError(
-      "The payment currency does not match NGN."
-    );
-  }
-
-  if (
-    payment.metadata?.payment_type !== "finance_facility_repayment"
-  ) {
-    throw new FinanceFacilityRepaymentError(
-      "This Paystack transaction is not a finance facility repayment.",
-      409
-    );
+  if (!isFinalFailure) {
+    if (payment.currency !== "NGN") {
+      throw new FinanceFacilityRepaymentError("The payment currency does not match NGN.");
+    }
+    if (payment.metadata?.payment_type !== "finance_facility_repayment") {
+      throw new FinanceFacilityRepaymentError(
+        "This Paystack transaction is not a finance facility repayment.",
+        409
+      );
+    }
   }
 
   const connection = await pool.getConnection();
+  let notifyAdminsWith = null;
 
   try {
     await connection.beginTransaction();
 
-    const repayment =
-      await repaymentModel.findRepaymentByPaystackReference(
-        reference,
-        connection
-      );
-
+    const repayment = await repaymentModel.findRepaymentByPaystackReference(reference, connection);
     if (!repayment) {
-      throw new FinanceFacilityRepaymentError(
-        "Repayment transaction not found.",
-        404
-      );
+      throw new FinanceFacilityRepaymentError("Repayment transaction not found.", 404);
     }
 
-    // Lock the transaction record to serialize concurrent verification.
-    const lockedRepayment =
-      await repaymentModel.findRepaymentByIdForUpdate(
-        repayment.id,
-        connection
-      );
-
-    if (!lockedRepayment) {
-      throw new FinanceFacilityRepaymentError(
-        "Repayment transaction not found.",
-        404
-      );
+    const locked = await repaymentModel.findRepaymentByIdForUpdate(repayment.id, connection);
+    if (!locked) {
+      throw new FinanceFacilityRepaymentError("Repayment transaction not found.", 404);
     }
 
-    if (
-      userId !== null &&
-      String(lockedRepayment.user_id) !== String(userId)
-    ) {
+    if (userId !== null && String(locked.user_id) !== String(userId)) {
       throw new FinanceFacilityRepaymentError(
         "You are not authorized to verify this repayment.",
         403
       );
     }
 
+    // Already past the 'pending' stage: report where it stands.
+    if (locked.status !== "pending") {
+      await connection.commit();
+      return publicRepayment(locked, { alreadyProcessed: true });
+    }
+
+    if (isFinalFailure) {
+      await repaymentModel.markRepaymentFailed(
+        { id: locked.id, reason: `Paystack reported the payment as ${payment.status}.` },
+        connection
+      );
+      await connection.commit();
+      const failed = await repaymentModel.findRepaymentById(locked.id);
+      return publicRepayment(failed, { alreadyProcessed: false });
+    }
+
     if (
-      String(payment.metadata?.facility_id) !==
-        String(lockedRepayment.facility_id) ||
-      String(payment.metadata?.user_id) !==
-        String(lockedRepayment.user_id)
+      String(payment.metadata?.facility_id) !== String(locked.facility_id) ||
+      String(payment.metadata?.user_id) !== String(locked.user_id)
     ) {
       throw new FinanceFacilityRepaymentError(
         "The Paystack transaction metadata does not match the repayment record.",
@@ -620,28 +692,8 @@ export async function verifyAndProcessRepayment({
       );
     }
 
-    if (lockedRepayment.status === "success") {
-      await connection.commit();
-
-      return {
-        success: true,
-        alreadyProcessed: true,
-        repaymentId: Number(lockedRepayment.id),
-        facilityId: Number(lockedRepayment.facility_id),
-        amount: moneyNumber(lockedRepayment.amount),
-        reference: lockedRepayment.paystack_reference,
-      };
-    }
-
-    if (lockedRepayment.status !== "pending") {
-      throw new FinanceFacilityRepaymentError(
-        "This repayment transaction cannot be processed."
-      );
-    }
-
     const paymentKobo = toKobo(payment.amount / 100);
-    const recordedKobo = toKobo(lockedRepayment.amount);
-
+    const recordedKobo = toKobo(locked.amount);
     if (paymentKobo !== recordedKobo) {
       throw new FinanceFacilityRepaymentError(
         "The verified Paystack amount does not match the repayment record.",
@@ -649,127 +701,259 @@ export async function verifyAndProcessRepayment({
       );
     }
 
-    const [facilities] = await connection.query(
-      `SELECT *
-       FROM finance_facility_applications
-       WHERE id = :facilityId
-       FOR UPDATE`,
-      { facilityId: lockedRepayment.facility_id }
-    );
-
-    const facility = facilities[0];
-
-    if (!facility || facility.status !== "disbursed") {
-      throw new FinanceFacilityRepaymentError(
-        "The facility is not eligible for repayment processing."
-      );
-    }
-
-    const [schedules] = await connection.query(
-      `SELECT *
-       FROM finance_facility_repayment_schedules
-       WHERE facility_id = :facilityId
-         AND amount_paid < amount_due
-       ORDER BY installment_number ASC
-       FOR UPDATE`,
-      { facilityId: lockedRepayment.facility_id }
-    );
-
-    const [totalsRows] = await connection.query(
-      `SELECT
-         COALESCE(SUM(amount_due - amount_paid), 0.00) AS outstanding
-       FROM finance_facility_repayment_schedules
-       WHERE facility_id = :facilityId`,
-      { facilityId: lockedRepayment.facility_id }
-    );
-
-    const outstandingKobo = toKobo(
-      totalsRows[0]?.outstanding ?? 0,
-      { allowZero: true }
-    );
-
-    if (paymentKobo > outstandingKobo) {
-      throw new FinanceFacilityRepaymentError(
-        "The verified payment exceeds the outstanding facility balance.",
-        409
-      );
-    }
-
-    if (paymentKobo > 0 && schedules.length === 0) {
-      throw new FinanceFacilityRepaymentError(
-        "No outstanding installments were found.",
-        409
-      );
-    }
-
-    let remainingKobo = paymentKobo;
-
-    for (const schedule of schedules) {
-      if (remainingKobo === 0) break;
-
-      const dueKobo = toKobo(schedule.amount_due);
-      const paidKobo = toKobo(
-        schedule.amount_paid,
-        { allowZero: true }
-      );
-
-      const installmentOutstandingKobo = dueKobo - paidKobo;
-
-      if (installmentOutstandingKobo <= 0) continue;
-
-      const allocationKobo = Math.min(
-        remainingKobo,
-        installmentOutstandingKobo
-      );
-
-      const updatedPaidKobo = paidKobo + allocationKobo;
-
-      const status =
-        updatedPaidKobo === dueKobo ? "paid" : "partial";
-
-      await repaymentModel.updateScheduleInstallmentPayment(
-        {
-          id: schedule.id,
-          amountPaid: fromKobo(updatedPaidKobo),
-          status,
-        },
-        connection
-      );
-
-      remainingKobo -= allocationKobo;
-    }
-
-    if (remainingKobo !== 0) {
-      throw new FinanceFacilityRepaymentError(
-        "Unable to allocate the full repayment amount.",
-        409
-      );
-    }
-
-    await repaymentModel.markRepaymentSuccessful(
-      {
-        id: lockedRepayment.id,
-        paidAt: new Date(),
-      },
+    const moved = await repaymentModel.markRepaymentPendingConfirmation(
+      { id: locked.id, paidAt: new Date() },
       connection
     );
+    if (!moved) {
+      throw new FinanceFacilityRepaymentError("This repayment cannot be processed.", 409);
+    }
 
     await connection.commit();
 
-    return {
-      success: true,
-      alreadyProcessed: false,
-      repaymentId: Number(lockedRepayment.id),
-      facilityId: Number(lockedRepayment.facility_id),
-      amount: moneyNumber(lockedRepayment.amount),
-      reference: lockedRepayment.paystack_reference,
-    };
+    notifyAdminsWith = locked;
   } catch (error) {
     await connection.rollback();
     throw error;
   } finally {
     connection.release();
   }
+
+  const updated = await repaymentModel.findRepaymentById(notifyAdminsWith.id);
+  const member = await getMemberContact(updated.user_id);
+  if (member) {
+    fireAndLog(
+      notify.repaymentSubmitted({
+        memberName: member.full_name,
+        memberEmail: member.email,
+        amount: updated.amount,
+        reference: updated.paystack_reference,
+      }),
+      "admin"
+    );
+  }
+
+  return publicRepayment(updated, { alreadyProcessed: false });
+}
+
+/**
+ * Admin confirms receipt. The schedule allocation happens here, inside the
+ * same transaction as the status change. If the payment would exceed the
+ * outstanding balance (e.g. a second payment landed after the facility was
+ * covered), it is declined instead and the member is told to arrange a refund.
+ */
+export async function confirmRepayment({ repaymentId, adminId }) {
+  const connection = await pool.getConnection();
+  let outcome;
+
+  try {
+    await connection.beginTransaction();
+
+    const locked = await repaymentModel.findRepaymentByIdForUpdate(repaymentId, connection);
+    if (!locked) {
+      throw new FinanceFacilityRepaymentError("Repayment transaction not found.", 404, "not_found");
+    }
+
+    if (String(locked.user_id) === String(adminId)) {
+      throw new FinanceFacilityRepaymentError(
+        "You can't confirm your own repayment.",
+        403,
+        "self_review"
+      );
+    }
+
+    if (locked.status !== "pending_confirmation") {
+      throw new FinanceFacilityRepaymentError(
+        "This repayment is not awaiting confirmation.",
+        409,
+        "invalid_state"
+      );
+    }
+
+    const paymentKobo = toKobo(locked.amount);
+
+    const [facilities] = await connection.query(
+      `SELECT * FROM finance_facility_applications WHERE id = :facilityId FOR UPDATE`,
+      { facilityId: locked.facility_id }
+    );
+    const facility = facilities[0];
+
+    if (!facility || !["disbursed", "completed"].includes(facility.status)) {
+      throw new FinanceFacilityRepaymentError(
+        "The facility is not eligible for repayment processing.",
+        409,
+        "invalid_state"
+      );
+    }
+
+    const [schedules] = await connection.query(
+      `SELECT *
+         FROM finance_facility_repayment_schedules
+        WHERE facility_id = :facilityId
+          AND amount_paid < amount_due
+        ORDER BY installment_number ASC
+        FOR UPDATE`,
+      { facilityId: locked.facility_id }
+    );
+
+    const [totalsRows] = await connection.query(
+      `SELECT COALESCE(SUM(amount_due - amount_paid), 0.00) AS outstanding
+         FROM finance_facility_repayment_schedules
+        WHERE facility_id = :facilityId`,
+      { facilityId: locked.facility_id }
+    );
+    const outstandingKobo = toKobo(totalsRows[0]?.outstanding ?? 0, { allowZero: true });
+
+    if (paymentKobo > outstandingKobo || schedules.length === 0) {
+      const reason =
+        "This payment exceeds the outstanding balance on your facility and could not be applied. Please contact the cooperative to arrange a refund.";
+      await repaymentModel.markRepaymentDeclined(
+        { id: locked.id, adminId, reason },
+        connection
+      );
+      await connection.commit();
+      outcome = { kind: "declined", repayment: locked, reason };
+    } else {
+      let remainingKobo = paymentKobo;
+
+      for (const schedule of schedules) {
+        if (remainingKobo === 0) break;
+
+        const dueKobo = toKobo(schedule.amount_due);
+        const paidKobo = toKobo(schedule.amount_paid, { allowZero: true });
+        const installmentOutstandingKobo = dueKobo - paidKobo;
+        if (installmentOutstandingKobo <= 0) continue;
+
+        const allocationKobo = Math.min(remainingKobo, installmentOutstandingKobo);
+        const updatedPaidKobo = paidKobo + allocationKobo;
+
+        await repaymentModel.updateScheduleInstallmentPayment(
+          {
+            id: schedule.id,
+            amountPaid: fromKobo(updatedPaidKobo),
+            status: updatedPaidKobo === dueKobo ? "paid" : "partial",
+          },
+          connection
+        );
+        remainingKobo -= allocationKobo;
+      }
+
+      if (remainingKobo !== 0) {
+        throw new FinanceFacilityRepaymentError(
+          "Unable to allocate the full repayment amount.",
+          409,
+          "allocation_failed"
+        );
+      }
+
+      const confirmed = await repaymentModel.markRepaymentConfirmed(
+        { id: locked.id, adminId },
+        connection
+      );
+      if (!confirmed) {
+        throw new FinanceFacilityRepaymentError(
+          "This repayment was changed by another request.",
+          409,
+          "invalid_state"
+        );
+      }
+
+      const completed = outstandingKobo - paymentKobo === 0;
+      if (completed) {
+        await repaymentModel.markFacilityCompleted(locked.facility_id, connection);
+      }
+
+      await connection.commit();
+      outcome = { kind: "confirmed", repayment: locked, completed };
+    }
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+
+  const member = await getMemberContact(outcome.repayment.user_id);
+  if (member) {
+    if (outcome.kind === "confirmed") {
+      fireAndLog(
+        notify.repaymentConfirmed(member.email, {
+          fullName: member.full_name,
+          amount: outcome.repayment.amount,
+          completed: outcome.completed,
+        }),
+        "member"
+      );
+    } else {
+      fireAndLog(
+        notify.repaymentDeclined(member.email, {
+          fullName: member.full_name,
+          amount: outcome.repayment.amount,
+          reason: outcome.reason,
+        }),
+        "member"
+      );
+    }
+  }
+
+  const final = await repaymentModel.findRepaymentById(repaymentId);
+  return publicRepayment(final, {
+    outcome: outcome.kind,
+    facilityCompleted: outcome.kind === "confirmed" ? outcome.completed : false,
+  });
+}
+
+export async function declineRepayment({ repaymentId, adminId, reason }) {
+  if (typeof reason !== "string" || !reason.trim()) {
+    throw new FinanceFacilityRepaymentError("A decline reason is required.", 422, "reason_required");
+  }
+
+  const connection = await pool.getConnection();
+  let locked;
+
+  try {
+    await connection.beginTransaction();
+
+    locked = await repaymentModel.findRepaymentByIdForUpdate(repaymentId, connection);
+    if (!locked) {
+      throw new FinanceFacilityRepaymentError("Repayment transaction not found.", 404, "not_found");
+    }
+    if (String(locked.user_id) === String(adminId)) {
+      throw new FinanceFacilityRepaymentError("You can't decline your own repayment.", 403, "self_review");
+    }
+    if (locked.status !== "pending_confirmation") {
+      throw new FinanceFacilityRepaymentError(
+        "This repayment is not awaiting confirmation.",
+        409,
+        "invalid_state"
+      );
+    }
+
+    await repaymentModel.markRepaymentDeclined(
+      { id: locked.id, adminId, reason: reason.trim() },
+      connection
+    );
+    await connection.commit();
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+
+  const member = await getMemberContact(locked.user_id);
+  if (member) {
+    fireAndLog(
+      notify.repaymentDeclined(member.email, {
+        fullName: member.full_name,
+        amount: locked.amount,
+        reason: reason.trim(),
+      }),
+      "member"
+    );
+  }
+
+  return publicRepayment(await repaymentModel.findRepaymentById(repaymentId));
 }
 
 export async function getAdminRepaymentHistory({ status = null } = {}) {

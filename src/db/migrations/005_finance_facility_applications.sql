@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS finance_facility_applications (
                                      'under_review',
                                      'additional_information_required',
                                      'approved',
+                                     'disbursed',
                                      'declined'
                                    ) NOT NULL DEFAULT 'submitted',
 
