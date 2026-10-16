@@ -386,6 +386,40 @@ reasonable starting guesses, not a lending policy — they encode real
 credit-risk judgment this codebase isn't qualified to make for the
 cooperative.
 
+### Business Finance Facility (phase 2: offer, disbursement, repayments)
+
+Lifecycle: `submitted → under_review → (additional_information_required) →
+approved → offer_accepted → disbursed → completed`. Branches: `declined`,
+and `offer_declined` (the member declined the offer; they can apply again
+immediately). Any status except `declined`, `offer_declined` and
+`completed` blocks a new application, so a member can't stack loans.
+
+- **Offer** — `POST /api/finance-facilities/:id/offer/accept` and
+  `.../offer/decline` (member, owner only). Admins are emailed either way.
+- **Disbursement** — `POST /api/admin/finance-facilities/:id/disburse`
+  only works from `offer_accepted`; any other status returns 409 with a
+  specific message. An admin can't approve, decline, request info on or
+  disburse their own application (403 `self_review`). Disbursing generates
+  the repayment schedule (monthly only).
+- **Repayments work like deposits.** The member pays through Paystack
+  (`POST /api/finance-facility-repayments/:facilityId/initialize`, then
+  `/verify`). A verified payment becomes `pending_confirmation` and is
+  **not applied to the schedule**. Paystack `failed`/`reversed` marks it
+  `failed` with a reason; `pending`/`abandoned` are left alone so the
+  member can retry.
+- **Admin confirm/decline** — `GET /api/finance-facility-repayments/admin`
+  (filter by `status`: `pending_confirmation`, `success`, `declined`,
+  `failed`), `POST .../admin/:repaymentId/confirm`, `POST
+  .../admin/:repaymentId/decline` (reason required). The schedule
+  allocation runs inside confirm, in one transaction. If a payment would
+  exceed the outstanding balance, confirm declines it instead and emails
+  the member to arrange a refund. When the last installment is paid the
+  facility becomes `completed`.
+- **Cap** — a new payment can't exceed the outstanding balance minus
+  payments already awaiting confirmation (and checkouts started in the
+  last hour), enforced under a facility row lock.
+- Repayment API errors return `{ success: false, error, message, code }`.
+
 ### Error handling across all routes
 
 Every route file wraps its controller with `wrapAsync()`
@@ -398,22 +432,26 @@ not just the one request). It surfaced while testing document upload
 against an unreachable Cloudinary; any unexpected failure anywhere
 (a DB hiccup, a storage outage) would have done the same. Now an
 unexpected error returns a normal 500 from the global handler in
-`app.js` and the server keeps running.
+`app.js` and the server keeps running. The handler also passes known
+`HttpError`s through with their own status and `{ error, code }` (a 409
+stays a 409).
 
 ### Database
 
 `src/db/migrations/` is a tracked, ordered sequence (`001_init.sql`,
 `002_kyc_and_deposits.sql`, `003_kyc_documents_to_cloudinary.sql`,
-`004_withdrawals.sql`, `005_finance_facility_applications.sql`). `npm run
+`004_withdrawals.sql`, `005_finance_facility_applications.sql`,
+`0261011_create_finance_facility_repayments.sql`,
+`0261012_offer_acceptance_and_repayment_confirmation.sql`). The last one
+assumes the `disbursed` status and the `disbursed_at` / `disbursed_by` /
+`disbursement_reference` columns already exist. `npm run
 migrate` records what's applied in a `schema_migrations` table and skips
 anything already run — safe to re-run, and the pattern for the next phase
 is just adding `006_*.sql`.
 
 ## What's next (not in this slice)
 
-Finance facility phase 2 — offer acceptance/decline, agreement
-generation + signed-agreement upload, disbursement, the active-facility
-record with repayment schedule, and appeals of declined applications —
-plus broader admin reporting and audit logs. Revisit the CSRF note above
+Agreement generation + signed-agreement upload and appeals of declined
+applications, plus broader admin reporting and audit logs. Revisit the CSRF note above
 before any of those move money; deposits and withdrawals already do, and
 disbursement/repayments will too, so it's worth prioritizing soon.
