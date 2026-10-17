@@ -522,6 +522,21 @@ export async function sumInFlightRepayments(facilityId, connection = null) {
 }
 
 /**
+ * Money the member has paid that is verified but not yet confirmed by an
+ * admin. It is NOT part of amount_paid on the schedule until confirmation.
+ */
+export async function sumAwaitingConfirmation(facilityId, connection = null) {
+  const [rows] = await getExecutor(connection).query(
+    `SELECT COALESCE(SUM(amount), 0.00) AS total
+       FROM finance_facility_repayments
+      WHERE facility_id = :facilityId
+        AND status = 'pending_confirmation'`,
+    { facilityId }
+  );
+  return rows[0]?.total ?? "0.00";
+}
+
+/**
  * Retrieve repayment history for a facility.
  */
 export async function listRepaymentsByFacility(

@@ -281,6 +281,11 @@ export async function getOutstandingBalance(facilityId, userId = null) {
     totalRepayable: moneyNumber(totals.totalDue),
     totalPaid: moneyNumber(totals.totalPaid),
     outstandingBalance: moneyNumber(totals.outstandingBalance),
+    // Paid and verified, waiting for an admin to confirm receipt. Not yet
+    // deducted from outstandingBalance (that happens on confirmation).
+    awaitingConfirmation: moneyNumber(
+      await repaymentModel.sumAwaitingConfirmation(facilityId)
+    ),
     installmentCount: totals.installmentCount,
     paidInstallmentCount: totals.paidInstallmentCount,
     completed:

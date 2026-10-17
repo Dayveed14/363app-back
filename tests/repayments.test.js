@@ -351,3 +351,27 @@ test("the global error handler keeps application status codes (409 stays 409)", 
   assert.equal(r.s, 409);
   assert.ok(r.j.error && r.j.code);
 });
+
+test("dashboard figures: outstanding only drops on confirmation; verified money shows as awaiting", async () => {
+  const fac = await disbursedFacility();
+  const dash = async () => (await t.call(member, "GET", `${R}/dashboard`)).j.data.facilities[0];
+
+  let f = await dash();
+  assert.equal(f.outstandingBalance, 100000);
+  assert.equal(f.totalPaid, 0);
+  assert.equal(f.awaitingConfirmation, 0);
+  assert.equal(f.installmentCount, 4);
+
+  const p = await payAndVerify(member, fac, 30000);
+  f = await dash();
+  assert.equal(f.outstandingBalance, 100000, "unconfirmed money must not reduce the balance");
+  assert.equal(f.awaitingConfirmation, 30000);
+
+  assert.equal((await confirm(p.id)).s, 200);
+  f = await dash();
+  assert.equal(f.outstandingBalance, 70000);
+  assert.equal(f.totalPaid, 30000);
+  assert.equal(f.awaitingConfirmation, 0);
+  assert.equal(f.nextRepayment.remainingAmount, 20000);
+  assert.equal(f.outstandingBalance, f.totalRepayable - f.totalPaid);
+});

@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS finance_facility_applications (
                                      'additional_information_required',
                                      'approved',
                                      'disbursed',
-                                     'declined'
+                                     'declined',
+                                     'offer_accepted',
                                    ) NOT NULL DEFAULT 'submitted',
 
   -- Set only once an officer approves — may differ from amount_requested

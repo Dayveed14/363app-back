@@ -101,6 +101,8 @@ const results = await Promise.all(
       outstandingBalance: balance.outstandingBalance,
       totalRepayable: balance.totalRepayable,
       totalPaid: balance.totalPaid,
+      awaitingConfirmation: balance.awaitingConfirmation,
+      installmentCount: balance.installmentCount,
       completed: balance.completed,
       nextRepayment,
       schedule,
