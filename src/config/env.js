@@ -8,7 +8,19 @@ function required(name, fallback = undefined) {
   return value;
 }
 
+const baseOrigins = [
+  "http://localhost:5173",
+  "https://363app-front.vercel.app",
+  "https://localhost",
+];
+const extraOrigins = (process.env.ALLOWED_ORIGINS || "")
+  .split(",")
+  .map((o) => o.trim())
+  .filter(Boolean);
+const clientOrigin = process.env.CLIENT_ORIGIN || "http://localhost:5173";
+
 export const env = {
+  allowedOrigins: [...new Set([...baseOrigins, clientOrigin, ...extraOrigins])],
   nodeEnv: process.env.NODE_ENV || "development",
   port: Number(process.env.PORT || 4000),
   clientOrigin: process.env.CLIENT_ORIGIN || "http://localhost:5173",

@@ -959,3 +959,32 @@ export async function declineRepayment({ repaymentId, adminId, reason }) {
 export async function getAdminRepaymentHistory({ status = null } = {}) {
   return repaymentModel.listRepaymentsForAdmin({ status });
 }
+/**
+ * Re-verify repayments still 'pending' after the member should have come
+ * back from Paystack. Verified payments move to 'pending_confirmation' (for
+ * admin confirmation), failed ones are marked failed, unfinished ones are
+ * left alone.
+ */
+export async function reconcileStaleRepayments({ olderThanMinutes = 5, limit = 50 } = {}) {
+  const stale = await repaymentModel.listStalePendingRepayments({ olderThanMinutes, limit });
+  const summary = { checked: stale.length, awaitingConfirmation: 0, failed: 0, stillPending: 0, errors: 0 };
+
+  for (const repayment of stale) {
+    try {
+      const result = await verifyAndProcessRepayment({
+        paystackReference: repayment.paystack_reference,
+      });
+      if (result.status === "pending_confirmation") summary.awaitingConfirmation += 1;
+      else if (result.status === "failed") summary.failed += 1;
+      else summary.stillPending += 1;
+    } catch (err) {
+      if (err instanceof FinanceFacilityRepaymentError && err.code === "payment_not_complete") {
+        summary.stillPending += 1;
+      } else {
+        summary.errors += 1;
+        console.error(`[repayment] reconcile failed ref=${repayment.paystack_reference}:`, err.message);
+      }
+    }
+  }
+  return summary;
+}

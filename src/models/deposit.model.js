@@ -177,3 +177,15 @@ export function toPublicDeposit(row) {
       : undefined,
   };
 }
+
+export async function listStaleInitialized({ olderThanMinutes = 5, limit = 50 }) {
+  const [rows] = await pool.query(
+    `SELECT * FROM deposits
+      WHERE status = 'initialized'
+        AND created_at < (NOW() - INTERVAL :minutes MINUTE)
+      ORDER BY created_at ASC
+      LIMIT :limit`,
+    { minutes: Number(olderThanMinutes), limit: Number(limit) }
+  );
+  return rows;
+}

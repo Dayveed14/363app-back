@@ -537,3 +537,16 @@ export async function declineAdminRepayment(req, res) {
     return handleError(res, error, "Unable to decline the repayment.");
   }
 }
+
+/**
+ * POST /api/finance-facility-repayments/admin/reconcile
+ * Re-verify repayments stuck in 'pending' (member never returned from Paystack).
+ */
+export async function reconcileAdminRepayments(req, res) {
+  try {
+    const summary = await repaymentService.reconcileStaleRepayments();
+    return res.json({ success: true, message: "Reconciliation finished.", data: summary });
+  } catch (error) {
+    return handleError(res, error, "Unable to reconcile repayments.");
+  }
+}

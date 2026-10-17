@@ -9,17 +9,15 @@ import { kycMemberRoutes, kycAdminRoutes } from "./routes/kyc.routes.js";
 import { depositMemberRoutes, depositAdminRoutes } from "./routes/deposit.routes.js";
 import { withdrawalMemberRoutes, withdrawalAdminRoutes } from "./routes/withdrawal.routes.js";
 import { financeFacilityMemberRoutes, financeFacilityAdminRoutes } from "./routes/financeFacility.routes.js";
+import { csrfProtection } from "./middleware/csrf.middleware.js";
+import webhookRoutes from "./routes/webhook.routes.js";
 import { HttpError } from "./utils/errors.js";
 import financeFacilityRepaymentRoutes from "./routes/financeFacilityRepayment.routes.js";
 
 export const app = express();
 
 
-const allowedOrigins = [
-  "http://localhost:5173",
-  "https://363app-front.vercel.app",
-  "https://localhost",
-];
+const allowedOrigins = env.allowedOrigins;
 
 app.set("trust proxy", 1); // needed on Render so req.ip / rate limiting / Secure cookies see the real client connection
 
@@ -38,15 +36,27 @@ app.use(
     credentials: true,
   })
 );
-app.use(express.json({ limit: "100kb" }));
+app.use(
+  express.json({
+    limit: "100kb",
+    // The Paystack webhook signature is computed over the exact raw bytes.
+    verify: (req, res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
 app.use(cookieParser());
+app.use(csrfProtection);
 
 // Standard combined-style log line only (method, path, status, timing) —
 // request bodies are never logged, so passwords/OTPs can't end up in logs.
-app.use(morgan(env.nodeEnv === "production" ? "combined" : "dev"));
+if (env.nodeEnv !== "test") {
+  app.use(morgan(env.nodeEnv === "production" ? "combined" : "dev"));
+}
 
 app.get("/health", (req, res) => res.json({ status: "ok" }));
 
+app.use("/api/webhooks", webhookRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/kyc", kycMemberRoutes);
 app.use("/api/admin/kyc", kycAdminRoutes);

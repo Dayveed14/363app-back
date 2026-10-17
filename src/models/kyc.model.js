@@ -75,21 +75,23 @@ export async function listByStatus(status) {
 }
 
 export async function approve({ id, reviewerId }) {
-  await pool.query(
+  const [result] = await pool.query(
     `UPDATE kyc_submissions
         SET status = 'approved', reviewed_by = :reviewerId, reviewed_at = NOW(), decline_reason = NULL
-      WHERE id = :id`,
+      WHERE id = :id AND status = 'pending'`,
     { id, reviewerId }
   );
+  return result.affectedRows === 1;
 }
 
 export async function decline({ id, reviewerId, reason }) {
-  await pool.query(
+  const [result] = await pool.query(
     `UPDATE kyc_submissions
         SET status = 'declined', reviewed_by = :reviewerId, reviewed_at = NOW(), decline_reason = :reason
-      WHERE id = :id`,
+      WHERE id = :id AND status = 'pending'`,
     { id, reviewerId, reason }
   );
+  return result.affectedRows === 1;
 }
 
 export function toPublicSubmission(row) {

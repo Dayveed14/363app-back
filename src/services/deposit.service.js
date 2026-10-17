@@ -19,11 +19,24 @@ export async function initialize({ userId, amount }) {
 
   await depositModel.createInitialized({ userId, reference, amount });
 
-  const { authorizationUrl } = await paystack.initializeTransaction({
-    email: user.email,
-    amountNaira: amount,
-    reference,
-  });
+  let authorizationUrl;
+  try {
+    ({ authorizationUrl } = await paystack.initializeTransaction({
+      email: user.email,
+      amountNaira: amount,
+      reference,
+    }));
+  } catch (err) {
+    // Checkout never started, so nothing can be paid against this reference.
+    // Close the row instead of leaving a permanent 'initialized' orphan.
+    console.error(`[deposit] Paystack initialize failed ref=${reference}:`, err.message);
+    await depositModel.markFailed({
+      reference,
+      reason: "Could not start the payment. Please try again.",
+      paystackRefId: null,
+    });
+    throw new HttpError(502, "payment_provider_unavailable", "We couldn't start the payment. Please try again.");
+  }
 
   return { reference, authorizationUrl };
 }
@@ -52,6 +65,19 @@ export async function verify({ reference, requester }) {
     throw new HttpError(403, "forbidden", "This isn't your deposit.");
   }
 
+  return verifyReference(reference);
+}
+
+/**
+ * The verification itself, with no caller identity attached. Used by the
+ * member's callback page, the Paystack webhook, and the reconciliation
+ * sweep — all of them funnel into the same atomic claim, so a payment can be
+ * reported by all three at once and is still credited exactly once.
+ */
+export async function verifyReference(reference) {
+  const deposit = await depositModel.findByReference(reference);
+  if (!deposit) throw new HttpError(404, "not_found", "Deposit not found.");
+
   // Cheap short-circuit for the common repeat call. NOT the safety mechanism —
   // two simultaneous calls both get past this; the atomic claim below is what
   // actually prevents a double credit.
@@ -59,7 +85,16 @@ export async function verify({ reference, requester }) {
     return depositModel.toPublicDeposit(deposit);
   }
 
-  const result = await paystack.verifyTransaction(reference);
+  let result;
+  try {
+    result = await paystack.verifyTransaction(reference);
+  } catch (err) {
+    // Provider unreachable: nothing was changed, the deposit stays
+    // 'initialized' and can simply be verified again (or picked up by the
+    // webhook / reconciliation sweep).
+    console.error(`[deposit] Paystack verify failed ref=${reference}:`, err.message);
+    throw new HttpError(502, "payment_provider_unavailable", "We couldn't reach the payment provider. Please try again shortly.");
+  }
 
   if (result.status === "success") {
     const expectedKobo = Math.round(Number(deposit.amount) * 100);
@@ -76,7 +111,25 @@ export async function verify({ reference, requester }) {
       return depositModel.toPublicDeposit(await depositModel.findByReference(reference));
     }
 
-    const credited = await depositModel.creditVerifiedDeposit({ reference, paystackRefId: result.paystackId });
+    let credited;
+    try {
+      credited = await depositModel.creditVerifiedDeposit({ reference, paystackRefId: result.paystackId });
+    } catch (err) {
+      if (err.code === "ER_DUP_ENTRY") {
+        // The same Paystack transaction is already attached to another
+        // deposit. Never credit it twice.
+        console.error(
+          `[deposit] DUPLICATE PAYSTACK TRANSACTION ref=${reference} paystack id ${result.paystackId} — NOT credited, reconcile manually`
+        );
+        await depositModel.markFailed({
+          reference,
+          reason: "This payment was already used for another deposit, so it was not credited. Please contact the cooperative office.",
+          paystackRefId: null,
+        });
+        return depositModel.toPublicDeposit(await depositModel.findByReference(reference));
+      }
+      throw err;
+    }
     if (credited) {
       const user = await userModel.findUserById(credited.userId);
       notify
@@ -155,4 +208,28 @@ export async function decline({ depositId, reviewerId, reason }) {
     .catch((err) => console.error("[deposit] member notification failed:", err.message));
 
   return depositModel.toPublicDeposit(await depositModel.findById(depositId));
+}
+
+/**
+ * Sweep for deposits that are still 'initialized' after the member should
+ * have come back (closed the tab, lost connection, callback page failed).
+ * Re-verifies each with Paystack. Safe to run repeatedly and concurrently with
+ * member callbacks and webhooks.
+ */
+export async function reconcileStale({ olderThanMinutes = 5, limit = 50 } = {}) {
+  const stale = await depositModel.listStaleInitialized({ olderThanMinutes, limit });
+  const summary = { checked: stale.length, credited: 0, failed: 0, stillPending: 0, errors: 0 };
+
+  for (const deposit of stale) {
+    try {
+      const result = await verifyReference(deposit.reference);
+      if (result.status === "pending_confirmation") summary.credited += 1;
+      else if (result.status === "failed") summary.failed += 1;
+      else summary.stillPending += 1;
+    } catch (err) {
+      summary.errors += 1;
+      console.error(`[deposit] reconcile failed ref=${deposit.reference}:`, err.message);
+    }
+  }
+  return summary;
 }

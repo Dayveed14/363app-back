@@ -49,8 +49,14 @@ export async function listForAdmin(status) {
 export async function approve({ submissionId, reviewerId }) {
   const submission = await kycModel.findById(submissionId);
   if (!submission) throw new HttpError(404, "not_found", "Submission not found.");
+  if (Number(submission.user_id) === Number(reviewerId)) {
+    throw new HttpError(403, "self_review", "You can't review your own KYC submission.");
+  }
 
-  await kycModel.approve({ id: submissionId, reviewerId });
+  const approved = await kycModel.approve({ id: submissionId, reviewerId });
+  if (!approved) {
+    throw new HttpError(409, "invalid_state", "This submission isn't pending review (it may already have been handled).");
+  }
   await userModel.markActive(submission.user_id);
 
   const user = await userModel.findUserById(submission.user_id);
@@ -66,8 +72,14 @@ export async function decline({ submissionId, reviewerId, reason }) {
 
   const submission = await kycModel.findById(submissionId);
   if (!submission) throw new HttpError(404, "not_found", "Submission not found.");
+  if (Number(submission.user_id) === Number(reviewerId)) {
+    throw new HttpError(403, "self_review", "You can't review your own KYC submission.");
+  }
 
-  await kycModel.decline({ id: submissionId, reviewerId, reason });
+  const declined = await kycModel.decline({ id: submissionId, reviewerId, reason });
+  if (!declined) {
+    throw new HttpError(409, "invalid_state", "This submission isn't pending review (it may already have been handled).");
+  }
 
   const user = await userModel.findUserById(submission.user_id);
   notify.kycDeclined(user.email, { fullName: user.full_name, reason }).catch((err) =>

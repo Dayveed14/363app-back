@@ -88,15 +88,18 @@ any of this to work (already done in the companion frontend's
 `src/api/client.js`) — otherwise the browser won't attach or accept these
 cookies at all.
 
-**CSRF note:** since auth now rides on cookies instead of a bearer token
-in a header, cross-site request forgery is a real consideration once
-state-changing, fund-moving endpoints exist (withdrawals, etc.). Right
-now, every state-changing route requires a JSON body, which forces a CORS
-preflight that only this app's exact `CLIENT_ORIGIN` can pass — that
-blocks the common CSRF vectors (plain forms, simple cross-site fetches)
-but isn't a substitute for real CSRF tokens. Worth adding explicit CSRF
-protection (e.g. double-submit cookie) before Phase 3 (money movement)
-ships.
+**CSRF protection** (`src/middleware/csrf.middleware.js`). Every
+state-changing request (POST/PUT/PATCH/DELETE) must pass two independent
+checks: it must carry the header `X-Requested-With: 363app` (the frontend's
+`api/client.js` adds it to every call — a cross-site page can't add a
+custom header to a credentialed request without a CORS preflight that our
+origin allow-list refuses), and if the browser sends an `Origin` header it
+must be an allowed origin. CORS already rejects unknown origins first; the
+CSRF middleware is a second layer. The Paystack webhook is exempt (no
+cookies; it authenticates by HMAC signature). Allowed origins are the two
+built-in ones plus `CLIENT_ORIGIN` plus anything in the optional
+`ALLOWED_ORIGINS` env var (comma-separated) — add a custom frontend domain
+there.
 
 ## Auth flow
 
@@ -420,6 +423,68 @@ immediately). Any status except `declined`, `offer_declined` and
   last hour), enforced under a facility row lock.
 - Repayment API errors return `{ success: false, error, message, code }`.
 
+### Payment recovery: webhook and reconciliation
+
+A member can pay and then close the tab before the callback page runs.
+Two mechanisms recover that, and both go through the exact same
+server-side verification and atomic claim as the callback page — so all
+three racing each other still credit **once**:
+
+- **Paystack webhook** — `POST /api/webhooks/paystack`. Set this URL in the
+  Paystack dashboard (Settings → API Keys & Webhooks) to
+  `https://<your-api-host>/api/webhooks/paystack`. The `x-paystack-signature`
+  HMAC-SHA512 over the raw body is checked with `PAYSTACK_SECRET_KEY`; bad
+  signatures get 401. The payload is never trusted for amounts or status —
+  it only names a reference, which is then verified directly with Paystack.
+  Deposits (`363-DEP-…`) are credited to `pending_confirmation`; loan
+  repayments move to `pending_confirmation` (never applied to the schedule
+  without an admin). Transient failures return 500 so Paystack retries.
+- **Reconciliation sweeps** — `POST /api/admin/deposits/reconcile` and
+  `POST /api/finance-facility-repayments/admin/reconcile` (admin only; the
+  admin pages have a "Check for missed payments" button). They re-verify
+  anything still `initialized`/`pending` after 5 minutes.
+
+Other payment-safety behaviour: if Paystack can't be reached when starting a
+deposit, the row is closed as `failed` rather than left as an orphan; if it
+can't be reached during verification nothing changes and the deposit stays
+retryable; a database failure while crediting rolls the claim back so it can
+be retried. `0261013_deposit_paystack_id_unique.sql` adds a unique index on
+`deposits.paystack_ref_id`, so a single Paystack transaction can never be
+credited to two deposits even if application code is bypassed (a duplicate is
+marked failed and logged for manual reconciliation). If that migration fails
+with a duplicate-entry error, two existing deposits point at the same Paystack
+transaction — investigate them first.
+
+KYC review also now blocks reviewing your own submission and only allows
+deciding a `pending` submission (an approved one can't be re-approved or
+declined).
+
+### Automated tests
+
+`npm test` runs ~90 tests against a real MySQL/MariaDB database with Paystack
+and Resend replaced by an in-memory fake (nothing external is ever called).
+**The tests delete data, so they refuse to run unless `DB_NAME` ends in
+`_test`.** One-time setup:
+
+```
+mysql -u root -p -e "CREATE DATABASE coop363_test"
+DB_NAME=coop363_test DB_USER=root DB_PASSWORD=... npm test
+```
+
+(or put the DB settings in `.env.test`, which overrides `.env` for tests).
+They drop and rebuild the test database's tables from the migrations each
+run. Coverage: CSRF and CORS; authorization (every admin route denies
+anonymous/member callers, cross-member access to KYC and facility documents,
+loans, deposits and withdrawals, admins reviewing their own items, role
+escalation); deposits (concurrent/duplicate verification, provider outages,
+abandoned/failed/mismatched payments, rollback on database failure,
+database-level duplicate guard, confirm/decline races, webhook,
+reconciliation); withdrawals (concurrent holds never overspend, OTP replay,
+rollback, refund-once, status machine, conservation of money); the loan
+lifecycle (offer, disbursement, schedule, allocation, kobo-exact arithmetic,
+pending-payment cap, overpayment handling, completion, failed payments); and
+rate limiting. `TEST_VERBOSE=1` shows server logs.
+
 ### Error handling across all routes
 
 Every route file wraps its controller with `wrapAsync()`
@@ -442,7 +507,8 @@ stays a 409).
 `002_kyc_and_deposits.sql`, `003_kyc_documents_to_cloudinary.sql`,
 `004_withdrawals.sql`, `005_finance_facility_applications.sql`,
 `0261011_create_finance_facility_repayments.sql`,
-`0261012_offer_acceptance_and_repayment_confirmation.sql`). The last one
+`0261012_offer_acceptance_and_repayment_confirmation.sql`,
+`0261013_deposit_paystack_id_unique.sql`). `0261012`
 assumes the `disbursed` status and the `disbursed_at` / `disbursed_by` /
 `disbursement_reference` columns already exist. `npm run
 migrate` records what's applied in a `schema_migrations` table and skips
@@ -452,6 +518,9 @@ is just adding `006_*.sql`.
 ## What's next (not in this slice)
 
 Agreement generation + signed-agreement upload and appeals of declined
-applications, plus broader admin reporting and audit logs. Revisit the CSRF note above
-before any of those move money; deposits and withdrawals already do, and
-disbursement/repayments will too, so it's worth prioritizing soon.
+applications, plus broader admin reporting and audit logs. Known gaps worth
+doing next: an append-only ledger/audit table for every balance movement;
+scheduling the reconciliation sweeps (e.g. a cron hitting the two reconcile
+endpoints every 10 minutes, or the same function from a scheduler); refresh
+token reuse detection; and CHECK constraints on non-negative balances once
+you've confirmed your TiDB version enforces them.

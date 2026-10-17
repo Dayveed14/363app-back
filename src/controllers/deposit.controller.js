@@ -75,3 +75,12 @@ export async function decline(req, res) {
     sendError(res, err);
   }
 }
+
+export async function reconcile(req, res) {
+  try {
+    const summary = await depositService.reconcileStale();
+    res.json({ message: "Reconciliation finished.", summary });
+  } catch (err) {
+    sendError(res, err);
+  }
+}

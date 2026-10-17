@@ -597,3 +597,14 @@ export async function listRepaymentsForAdmin(
 
   return rows;
 }
+export async function listStalePendingRepayments({ olderThanMinutes = 5, limit = 50 } = {}) {
+  const [rows] = await pool.query(
+    `SELECT * FROM finance_facility_repayments
+      WHERE status = 'pending'
+        AND created_at < (NOW() - INTERVAL :minutes MINUTE)
+      ORDER BY created_at ASC
+      LIMIT :limit`,
+    { minutes: Number(olderThanMinutes), limit: Number(limit) }
+  );
+  return rows;
+}

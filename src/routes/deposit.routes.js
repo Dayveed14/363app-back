@@ -31,6 +31,7 @@ memberRouter.get("/me", depositController.listMine);
 adminRouter.use(requireAuth, requireAdmin);
 
 adminRouter.get("/", depositController.list);
+adminRouter.post("/reconcile", depositController.reconcile);
 adminRouter.post("/:id/confirm", depositController.confirm);
 adminRouter.post(
   "/:id/decline",

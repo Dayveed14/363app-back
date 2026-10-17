@@ -12,6 +12,7 @@ import {
   generateAdminRepaymentSchedule,
   confirmAdminRepayment,
   declineAdminRepayment,
+  reconcileAdminRepayments,
 } from "../controllers/financeFacilityRepayment.controller.js";
 
 import {
@@ -58,6 +59,13 @@ router.post(
   requireAuth,
   requireAdmin,
   verifyAdminRepayment
+);
+
+router.post(
+  "/admin/reconcile",
+  requireAuth,
+  requireAdmin,
+  reconcileAdminRepayments
 );
 
 router.post(
